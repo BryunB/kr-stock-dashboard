@@ -60,6 +60,41 @@ def test_sentiment_history_full_empty_when_no_log(tmp_path, monkeypatch):
     assert list(full.columns) == ["avg_sentiment", "positive_count", "negative_count", "article_count"]
 
 
+def test_log_sentiment_from_news_counts_labels(tmp_path, monkeypatch):
+    """뉴스 DataFrame에서 긍정/부정 기사 수까지 채워 기록해야 한다."""
+    monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
+    news_df = pd.DataFrame(
+        {
+            "sentiment_label": ["긍정", "긍정", "부정", "중립"],
+            "sentiment_score": [2.0, 1.0, -1.0, 0.0],
+        }
+    )
+    news.log_sentiment_from_news("TESTCODE3", news_df, date=pd.Timestamp("2026-01-01"))
+
+    full = news.sentiment_history_full("TESTCODE3")
+    assert full["positive_count"].iloc[0] == 2
+    assert full["negative_count"].iloc[0] == 1
+    assert full["article_count"].iloc[0] == 4
+    assert full["avg_sentiment"].iloc[0] == pytest.approx(0.5)
+
+
+def test_log_sentiment_from_news_ignores_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
+    news.log_sentiment_from_news("TESTCODE4", pd.DataFrame())
+    assert news.sentiment_history_full("TESTCODE4").empty
+
+
+def test_sentiment_history_full_coerces_old_none_counts(tmp_path, monkeypatch):
+    """카운트가 전부 None인 옛 로그도 숫자(float)로 돌려줘야 학습 피처가 object로 새지 않는다."""
+    monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
+    news.log_daily_sentiment("OLDCODE", 0.9, date=pd.Timestamp("2026-01-01"))  # 카운트 미지정
+
+    full = news.sentiment_history_full("OLDCODE")
+    for c in ["positive_count", "negative_count", "article_count"]:
+        assert full[c].dtype.kind == "f", f"{c}가 float이 아님: {full[c].dtype}"
+        assert full[c].fillna(0.0).dtype.kind == "f"
+
+
 def test_log_daily_sentiment_overwrites_same_date(tmp_path, monkeypatch):
     monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
     code = "TESTCODE2"

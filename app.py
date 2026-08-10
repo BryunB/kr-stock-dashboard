@@ -326,9 +326,7 @@ st.caption(
 
 # 예측 피처로 쓸 뉴스 감성 히스토리를 먼저 갱신한다 (조회 실패해도 페이지 전체가 죽지 않도록 방어).
 try:
-    _news_for_log = _news(selected_code, 10)
-    if not _news_for_log.empty:
-        news.log_daily_sentiment(selected_code, float(_news_for_log["sentiment_score"].mean()))
+    news.log_sentiment_from_news(selected_code, _news(selected_code, 10))
 except Exception:
     pass
 sentiment_hist = news.sentiment_history(selected_code)

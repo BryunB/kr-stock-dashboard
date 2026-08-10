@@ -53,7 +53,7 @@ tests/            pytest
 - **네이버 금융 뉴스 스크래핑**(`news.py`)은 `Referer` 헤더(`https://finance.naver.com/item/news.naver?code={종목코드}`)가 없으면 빈 결과("검색된 뉴스가 없습니다")를 반환한다. 또한 응답 인코딩이 `euc-kr`이라 `r.encoding = "euc-kr"`을 명시해야 한글이 깨지지 않는다. 기사 원문은 목록 페이지가 아니라 `n.news.naver.com/mnews/article/{office_id}/{article_id}`에 있다 (목록의 `news_read.naver` 링크는 JS로 이 URL에 리다이렉트만 함 — office_id/article_id를 href에서 파싱해 바로 이 URL을 구성하면 리다이렉트 왕복을 생략할 수 있다).
 - **DART API**는 무료지만 각자 https://opendart.fss.or.kr 에서 이메일 인증 후 키를 발급받아야 한다 — Claude가 대신 발급받을 수 없다. 키는 `.env`(gitignore됨)의 `DART_API_KEY`로 관리하고 `config.py`가 `python-dotenv`로 로드한다. 종목코드(6자리)와 DART의 corp_code(8자리)는 다른 체계라 `corpCode.xml`(zip) 전체를 내려받아 매핑해야 한다 — 이것도 상장사 전체를 한 번에 주므로 종목별 반복 호출이 아니다.
 - **API 키는 절대 코드에 하드코딩하거나 커밋되는 파일에 넣지 않는다.** 항상 `.env` + `config.py`의 `os.environ.get(...)` 패턴을 따른다. 키가 없을 때는 조용히 실패하지 말고 (`DartKeyMissing`처럼) 무엇을 어디서 발급받아야 하는지 알려주는 예외/메시지를 낸다.
-- **뉴스 감성의 과거 히스토리는 조회할 방법이 없다** (뉴스 소스가 최신 기사 목록만 제공). `predictor.py`가 뉴스 피처를 쓰려면 `news.log_daily_sentiment()`로 매 실행마다 그날의 평균 감성을 `data/raw/news_sentiment/{종목코드}.parquet`에 누적 기록하는 수밖에 없다 — 기록 시작 전 과거는 중립(0)으로 채운다. 이 로그는 `data/raw/`에 있어 `.gitignore`가 "재생성 가능한 캐시"로 취급하지만, 실제로는 한 번 지우면 복구 불가능한 유일한 데이터다(다른 data/raw·data/cache 파일과 성격이 다름).
+- **뉴스 감성의 과거 히스토리는 조회할 방법이 없다** (뉴스 소스가 최신 기사 목록만 제공). `predictor.py`가 뉴스 피처를 쓰려면 매 실행마다 그날의 감성을 `data/raw/news_sentiment/{종목코드}.parquet`에 누적 기록하는 수밖에 없다 — 기록 시작 전 과거는 중립(0)으로 채운다. 기록은 **`news.log_sentiment_from_news(code, news_df)`** 를 쓴다(저수준 `log_daily_sentiment()`를 직접 부르지 말 것). 평균 점수만 넘기면 심층 모델이 쓰는 긍정/부정/기사 수 피처가 영원히 비어 항상 0이 된다 — 실제로 그렇게 방치됐던 적이 있다. 이 로그는 `data/raw/`에 있어 `.gitignore`가 "재생성 가능한 캐시"로 취급하지만, 실제로는 한 번 지우면 복구 불가능한 유일한 데이터다(다른 data/raw·data/cache 파일과 성격이 다름).
 
 ## 가격 예측(ML) 기능 작성 규칙
 

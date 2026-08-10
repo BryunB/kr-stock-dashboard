@@ -191,13 +191,36 @@ def sentiment_history_full(code: str) -> pd.DataFrame:
     기록이 없으면 빈 DataFrame. ("정확한 예측" 심층 모델용 — 기본 모델은 sentiment_history() 사용)
     이 컬럼들이 추가되기 전에 기록된 옛 로그 파일에는 positive_count 등이 없을 수 있어
     없으면 NaN으로 채운다 (predictor.py에서 다시 0으로 채워짐).
+
+    카운트가 전부 None인 옛 파일은 parquet에서 object dtype으로 돌아와 그대로 두면
+    학습 피처가 object로 흘러간다. 여기서 숫자로 강제 변환해 항상 float으로 넘긴다.
     """
     path = _sentiment_log_path(code)
     cols = ["avg_sentiment", "positive_count", "negative_count", "article_count"]
     if not path.exists():
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=cols, dtype=float)
     df = pd.read_parquet(path).set_index("date")
     for c in cols:
-        if c not in df.columns:
-            df[c] = float("nan")
+        df[c] = pd.to_numeric(df[c], errors="coerce") if c in df.columns else float("nan")
     return df[cols]
+
+
+def log_sentiment_from_news(code: str, news_df: pd.DataFrame, date: pd.Timestamp | None = None) -> None:
+    """뉴스 DataFrame에서 그날의 감성 통계를 집계해 기록한다.
+
+    fetch_news_with_sentiment()의 결과를 그대로 넘기면 된다. 평균 점수뿐 아니라
+    긍정/부정 기사 수와 총 기사 수까지 채워야 심층 예측 모델의 뉴스 피처가 실제로
+    값을 갖는다 (평균만 기록하면 그 피처들이 항상 0이라 무의미해진다).
+    빈 DataFrame이면 아무것도 하지 않는다.
+    """
+    if news_df is None or news_df.empty:
+        return
+    labels = news_df.get("sentiment_label")
+    log_daily_sentiment(
+        code,
+        float(news_df["sentiment_score"].mean()),
+        positive_count=int((labels == "긍정").sum()) if labels is not None else None,
+        negative_count=int((labels == "부정").sum()) if labels is not None else None,
+        article_count=int(len(news_df)),
+        date=date,
+    )
