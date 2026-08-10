@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.ruff_cache/
+
+# 데이터 / 산출물 (재생성 가능하므로 커밋하지 않음)
+data/cache/
+data/raw/*
+output/
+*.parquet
+*.csv
+
+# 예외: 뉴스 감성 히스토리만은 추적한다.
+# 뉴스 소스가 과거 날짜의 감성을 조회할 방법이 없어 앱을 실행한 날부터 하루씩 쌓이는
+# 데이터라, 한 번 지우면 과거로 되돌아가 다시 만들 수 없다 (다른 data/ 파일과 성격이 다름).
+# 위 *.parquet 보다 뒤에 와야 재포함이 적용된다 (마지막에 일치하는 규칙이 이김).
+!data/raw/news_sentiment/
+!data/raw/news_sentiment/*.parquet
+
+# 에디터 / OS
+.vscode/*
+!.vscode/settings.json
+.idea/
+Thumbs.db
+desktop.ini
+
+# Claude Code (settings.json은 공유, settings.local.json은 머신별 권한 목록이라 제외)
+.claude/settings.local.json
+
+# 비밀값
+.env

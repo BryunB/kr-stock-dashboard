@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".venv/Scripts/python.exe -c \"import json,sys,subprocess,os\nd=json.load(sys.stdin)\nf=d.get('tool_input',{}).get('file_path') or d.get('tool_response',{}).get('filePath')\nif f and f.endswith('.py'):\n    exe=os.path.join(os.path.dirname(sys.executable),'ruff.exe')\n    subprocess.run([exe,'format',f])\n\""
+          }
+        ]
+      }
+    ]
+  }
+}

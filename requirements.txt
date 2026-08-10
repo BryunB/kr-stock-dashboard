@@ -1,0 +1,33 @@
+# Python 3.14 / Windows 검증 완료 (2026-08-10)
+# 설치: .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 데이터 수집
+finance-datareader==0.9.202
+
+# 데이터 처리
+pandas==3.0.5
+numpy==2.5.2
+pyarrow==24.0.0          # parquet 캐시 (streamlit이 요구하는 상한 버전)
+scikit-learn==1.9.0      # 가격 예측(릿지 회귀 기본 + RandomForest/GradientBoosting "정확한 예측" 심층 모델)
+
+# 시각화
+matplotlib==3.11.1
+plotly==6.9.0            # finance-datareader 의존성이자 인터랙티브 차트용
+
+# 대시보드
+streamlit==1.61.1
+
+# 노트북
+jupyterlab==4.6.2
+ipykernel==7.3.0
+
+# 유틸
+requests==2.34.2
+lxml==6.1.1
+beautifulsoup4==4.15.0   # 네이버 뉴스 스크래핑에도 사용
+tqdm==4.70.0
+python-dotenv==1.2.2      # .env에서 DART_API_KEY 등 로드
+
+# 테스트 / 린트
+pytest==9.1.1
+ruff==0.16.2

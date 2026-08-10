@@ -1,0 +1,12 @@
+line-length = 110
+target-version = "py314"
+extend-exclude = ["notebooks"]  # 매직 명령(%autoreload)이 import보다 먼저 오는 게 정상이라 제외
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # 줄 길이는 line-length로 관리, 하드 에러로 만들지 않음
+]
+
+[format]
+quote-style = "double"
