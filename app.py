@@ -17,6 +17,30 @@ st.set_page_config(page_title="주가 스크리닝 대시보드", layout="wide")
 DATE_RANGES = {"1개월": 30, "3개월": 90, "6개월": 180, "1년": 365, "2년": 730, "3년": 1095, "전체": None}
 SMA_CHOICES = (5, 20, 60, 120)
 
+# 색상 관행: 상승=빨강 / 하락=파랑 (미국식과 반대). charts.py의 캔들 색(_UP/_DOWN)과 같은 계열.
+# 확정된 시세는 캔들과 동일한 원색을 쓰고, '예측값'은 사실이 아니라 추정치이므로
+# 같은 색상 계열을 유지하되 채도를 낮춘 파스텔 톤으로 그려 시각적으로 구분한다.
+# 파스텔 톤은 원색과 색상(H)·명도(L)를 그대로 두고 채도(S)만 84~91% -> 50%로 낮춘 값이라
+# 같은 색 계열로 보이면서 톤만 부드러워진다. 라이트/다크 배경 모두에서 대비 3:1 이상을
+# 유지하도록 명도는 건드리지 않았다 (더 밝히면 흰 배경에서 읽기 어려워진다).
+UP_COLOR, DOWN_COLOR, FLAT_COLOR = "#ef4444", "#3b82f6", "#6b7280"  # 실측 시세용 (원색)
+UP_SOFT, DOWN_SOFT, FLAT_SOFT = "#cc6666", "#668dcc", "#9ca3af"  # 예측값용 (파스텔)
+
+
+def _change_html(diff: float, pct: float, *, soft: bool = False) -> str:
+    """등락 표시 마크업. soft=True면 예측값용 파스텔 톤을 쓴다.
+
+    st.metric의 delta는 초록/빨강 조합만 지원해 국내 관행(상승=빨강/하락=파랑)과
+    어긋나므로, delta를 쓰지 않고 색을 직접 지정해 그린다.
+    """
+    up, down, flat = (UP_SOFT, DOWN_SOFT, FLAT_SOFT) if soft else (UP_COLOR, DOWN_COLOR, FLAT_COLOR)
+    color = up if diff > 0 else down if diff < 0 else flat
+    arrow = "▲" if diff > 0 else "▼" if diff < 0 else "―"
+    return (
+        f"<span style='color:{color};font-weight:600;font-size:0.95rem'>"
+        f"{arrow} {diff:+,.0f}원 ({pct:+.2f}%)</span>"
+    )
+
 
 @st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="전종목 시세 불러오는 중...")
 def _screen(market: str, days_back: int, min_marcap: float, min_volume: float) -> pd.DataFrame:
@@ -38,18 +62,17 @@ def _dart(code: str) -> pd.DataFrame:
     return dart.fetch_disclosures(code)
 
 
-st.title("📈 KOSPI · KOSDAQ 상승률 스크리닝")
+st.title("📊 주가 요약")
 
-# ------------------------------------------------------------------ 사이드바: 스크리닝 조건
+# ------------------------------------------------------------------ 사이드바: 공통 필터
 with st.sidebar:
-    st.header("스크리닝 조건")
+    st.header("공통 필터")
+    st.caption("아래 조건은 세 탭(상승률·거래대금·시가총액)에 모두 적용됩니다.")
     market = st.selectbox(
         "시장",
         ["ALL", "KOSPI", "KOSDAQ"],
         format_func=lambda m: {"ALL": "전체 (KOSPI+KOSDAQ)", "KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}[m],
     )
-    basis = st.radio("정렬 기준", ["일간", "주간"], horizontal=True)
-    direction = st.radio("방향", ["상승률 높은순", "하락률 큰순"], horizontal=True)
     top_n = st.slider("표시 개수", 10, 100, 30, step=10)
     min_marcap_eok = st.slider("최소 시가총액 (억원)", 0, 5000, 300, step=50)
     min_volume = st.number_input("최소 거래량(주)", min_value=0, value=1000, step=1000)
@@ -59,55 +82,92 @@ with st.sidebar:
         dl.clear_cache()
         st.rerun()
 
-# ------------------------------------------------------------------ 스크리닝 테이블
-basis_col = "DailyChangeRatio" if basis == "일간" else "WeeklyChangeRatio"
-ascending = direction == "하락률 큰순"
-
+# ------------------------------------------------------------------ 스크리닝 테이블 (조건별 탭)
 try:
     universe = _screen(market, 7, min_marcap_eok * 1e8, float(min_volume))
 except Exception as e:
     st.error(f"스크리닝 데이터를 불러오지 못했습니다: {e}")
     st.stop()
 
-ranked = screener.top_movers(universe, by=basis_col, n=top_n, ascending=ascending)
-
 market_label = "KOSPI+KOSDAQ" if market == "ALL" else market
-st.caption(f"{market_label} 전체 {len(universe):,}종목 중 {basis} {direction} 상위 {len(ranked)}개")
 
-display = ranked.rename(
-    columns={
-        "Name": "종목명",
-        "Market": "시장",
-        "Close": "종가",
-        "DailyChangeRatio": "일간%",
-        "WeeklyChangeRatio": "주간%",
-        "Volume": "거래량",
-        "Marcap": "시가총액",
-    }
-).copy()
-display["시가총액"] = display["시가총액"] / 1e8
+_TABLE_COLS = ["Code", "종목명", "시장", "종가", "일간%", "주간%", "거래량", "거래대금", "시가총액"]
+_COL_CONFIG = {
+    "종가": st.column_config.NumberColumn(format="%,d원"),
+    "일간%": st.column_config.NumberColumn(format="%.2f%%"),
+    "주간%": st.column_config.NumberColumn(format="%.2f%%"),
+    "거래량": st.column_config.NumberColumn(format="%,d주"),
+    "거래대금": st.column_config.NumberColumn(format="%,.0f억원"),
+    "시가총액": st.column_config.NumberColumn(format="%,.0f억원"),
+}
 
-event = st.dataframe(
-    display[["Code", "종목명", "시장", "종가", "일간%", "주간%", "거래량", "시가총액"]],
-    width="stretch",
-    hide_index=True,
-    height=min(38 * (len(display) + 1), 640),
-    column_config={
-        "종가": st.column_config.NumberColumn(format="%,d원"),
-        "일간%": st.column_config.NumberColumn(format="%.2f%%"),
-        "주간%": st.column_config.NumberColumn(format="%.2f%%"),
-        "거래량": st.column_config.NumberColumn(format="%,d"),
-        "시가총액": st.column_config.NumberColumn(format="%,.0f억원"),
-    },
-    on_select="rerun",
-    selection_mode="single-row",
-    key="gainers_table",
-)
 
-if event.selection.rows:
-    picked = ranked.iloc[event.selection.rows[0]]
-    st.session_state["selected_code"] = picked["Code"]
-    st.session_state["selected_name"] = picked["Name"]
+def _render_table(ranked: pd.DataFrame, key: str):
+    """스크리닝 결과 테이블을 그리고 선택 이벤트를 돌려준다. 억원 단위 변환은 여기서만."""
+    display = ranked.rename(
+        columns={
+            "Name": "종목명",
+            "Market": "시장",
+            "Close": "종가",
+            "DailyChangeRatio": "일간%",
+            "WeeklyChangeRatio": "주간%",
+            "Volume": "거래량",
+            "Amount": "거래대금",
+            "Marcap": "시가총액",
+        }
+    ).copy()
+    display["거래대금"] = display["거래대금"] / 1e8
+    display["시가총액"] = display["시가총액"] / 1e8
+    return st.dataframe(
+        display[_TABLE_COLS],
+        width="stretch",
+        hide_index=True,
+        height=min(38 * (len(display) + 1), 640),
+        column_config=_COL_CONFIG,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=key,
+    )
+
+
+rise_tab, amount_tab, marcap_tab = st.tabs(["📈 상승률", "💰 거래대금", "🏢 시가총액"])
+picks = []  # (탭 key, 정렬된 df, 선택 이벤트)
+
+with rise_tab:
+    # 등락률은 '어느 기간을 볼지 / 오름·내림 중 무엇을 볼지'가 의미가 있어서 이 탭에만 컨트롤을 둔다.
+    c1, c2 = st.columns(2)
+    with c1:
+        basis = st.radio("정렬 기준", ["일간", "주간"], horizontal=True)
+    with c2:
+        direction = st.radio("방향", ["상승률 높은순", "하락률 큰순"], horizontal=True)
+    basis_col = "DailyChangeRatio" if basis == "일간" else "WeeklyChangeRatio"
+    ranked_rise = screener.top_movers(universe, by=basis_col, n=top_n, ascending=(direction == "하락률 큰순"))
+    st.caption(f"{market_label} 전체 {len(universe):,}종목 중 {basis} {direction} 상위 {len(ranked_rise)}개")
+    picks.append(("tbl_rise", ranked_rise, _render_table(ranked_rise, "tbl_rise")))
+
+with amount_tab:
+    ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
+    st.caption(
+        f"{market_label} 전체 {len(universe):,}종목 중 거래대금 상위 {len(ranked_amount)}개 "
+        "— 그날 실제로 돈이 가장 많이 오간 종목입니다."
+    )
+    picks.append(("tbl_amount", ranked_amount, _render_table(ranked_amount, "tbl_amount")))
+
+with marcap_tab:
+    ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
+    st.caption(f"{market_label} 전체 {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
+    picks.append(("tbl_marcap", ranked_marcap, _render_table(ranked_marcap, "tbl_marcap")))
+
+# 세 테이블의 선택 상태는 탭을 옮겨도 각자 남아 있다. 매 rerun마다 전부 "선택됨"으로 보이므로
+# 그대로 반영하면 마지막 탭이 항상 이겨버린다 — 직전에 처리한 값과 달라진 탭만 반영한다.
+for tbl_key, ranked_df, event in picks:
+    if not event.selection.rows:
+        continue
+    picked = ranked_df.iloc[event.selection.rows[0]]
+    if st.session_state.get(f"_last_{tbl_key}") != picked["Code"]:
+        st.session_state[f"_last_{tbl_key}"] = picked["Code"]
+        st.session_state["selected_code"] = picked["Code"]
+        st.session_state["selected_name"] = picked["Name"]
 
 st.divider()
 
@@ -151,6 +211,59 @@ price_df = _price(selected_code, start_date)
 if price_df.empty:
     st.error(f"'{selected_code}' 가격 데이터를 찾을 수 없습니다.")
     st.stop()
+
+# ------------------------------------------------------------------ 시세 요약 (원 단위)
+_last = price_df.iloc[-1]
+_last_date = price_df.index[-1]
+_close = float(_last["Close"])
+_prev_close = float(price_df["Close"].iloc[-2]) if len(price_df) >= 2 else None
+
+# 거래대금·시가총액은 KRX 스냅샷(universe)에 정확한 값이 있다 (거래대금은 체결가마다 다르므로
+# 종가×거래량으로는 정확히 못 구한다). 필터에 걸려 빠졌거나 해외 종목이면 없으므로 그때만 근사한다.
+# 단 두 소스는 갱신 시점이 달라서, 장중에는 같은 종목인데 거래량이 서로 어긋날 수 있다 —
+# 그 경우 아래 캡션에 "갱신 시점 다름"을 명시해 사용자가 오해하지 않게 한다.
+_urow = universe[universe["Code"] == selected_code]
+_amount_approx = _urow.empty
+_amount_stale = False
+if not _urow.empty:
+    _amount, _marcap = float(_urow.iloc[0]["Amount"]), float(_urow.iloc[0]["Marcap"])
+    _snap_vol = float(_urow.iloc[0]["Volume"])
+    _live_vol = float(_last["Volume"])
+    _amount_stale = _live_vol > 0 and abs(_snap_vol - _live_vol) / _live_vol > 0.01
+else:
+    _amount, _marcap = _close * float(_last["Volume"]), None
+
+st.markdown(f"#### {selected_name} ({selected_code})")
+
+_r1 = st.columns(4)
+_r1[0].metric("현재가 (종가)", f"{_close:,.0f}원")
+if _prev_close:
+    _diff = _close - _prev_close
+    # 실제 체결된 시세이므로 캔들 차트와 같은 원색을 쓴다 (예측값만 파스텔).
+    _r1[0].markdown(
+        _change_html(_diff, _diff / _prev_close * 100),
+        unsafe_allow_html=True,
+    )
+_r1[1].metric("시가", f"{float(_last['Open']):,.0f}원")
+_r1[2].metric("고가", f"{float(_last['High']):,.0f}원")
+_r1[3].metric("저가", f"{float(_last['Low']):,.0f}원")
+
+_r2 = st.columns(4)
+_r2[0].metric("전일 종가", f"{_prev_close:,.0f}원" if _prev_close else "—")
+_r2[1].metric("일중 변동폭", f"{float(_last['High']) - float(_last['Low']):,.0f}원")
+_r2[2].metric("거래량", f"{float(_last['Volume']):,.0f}주")
+_r2[3].metric("거래대금", f"{_amount / 1e8:,.0f}억원")
+
+_notes = [f"{_last_date:%Y-%m-%d (%a)} 기준"]
+if _marcap:
+    _notes.append(f"시가총액 {_marcap / 1e8:,.0f}억원")
+if _amount_approx:
+    _notes.append("거래대금은 종가×거래량 추정치")
+elif _amount_stale:
+    # 장중에는 시세 피드와 KRX 스냅샷의 갱신 시점이 달라 거래량/거래대금이 서로 안 맞을 수 있다.
+    _notes.append("거래대금·시가총액은 KRX 스냅샷 기준이라 장중에는 거래량과 시점이 다를 수 있음")
+_notes.append("상승=빨강 / 하락=파랑")
+st.caption(" · ".join(_notes))
 
 enriched = ind.add_all(price_df)
 
@@ -237,7 +350,10 @@ for col, pred, label in [
         st.metric(
             pred["target_date"].strftime("%Y-%m-%d (%a)"),
             f"{pred['predicted_price']:,.0f}원",
-            f"{delta:+,.0f}원 ({pred['predicted_return'] * 100:+.2f}%)",
+        )
+        st.markdown(
+            _change_html(delta, pred["predicted_return"] * 100, soft=True),
+            unsafe_allow_html=True,
         )
         st.caption(
             f"홀드아웃 검증 {pred['n_test']}거래일 기준 · "
@@ -282,7 +398,10 @@ if adv_pred and adv_pred["code"] == selected_code:
             st.metric(
                 pred["target_date"].strftime("%Y-%m-%d (%a)"),
                 f"{pred['predicted_price']:,.0f}원",
-                f"{delta:+,.0f}원 ({pred['predicted_return'] * 100:+.2f}%)",
+            )
+            st.markdown(
+                _change_html(delta, pred["predicted_return"] * 100, soft=True),
+                unsafe_allow_html=True,
             )
             st.caption(
                 f"선정 모델: {pred['best_model']} · 홀드아웃 검증 {pred['n_holdout']}거래일 기준 · "
@@ -346,7 +465,7 @@ with st.expander("모델 상세 (피처 영향도)"):
 st.divider()
 st.subheader("뉴스 & 공시")
 
-_SENT_COLOR = {"긍정": "#ef4444", "중립": "#6b7280", "부정": "#3b82f6"}  # 상승=빨강, 하락=파랑
+_SENT_COLOR = {"긍정": UP_COLOR, "중립": FLAT_COLOR, "부정": DOWN_COLOR}  # 상승=빨강, 하락=파랑
 
 news_tab, dart_tab = st.tabs(["📰 뉴스", "📋 공시 (DART)"])
 
