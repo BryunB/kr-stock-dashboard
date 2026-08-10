@@ -95,6 +95,51 @@ def test_sentiment_history_full_coerces_old_none_counts(tmp_path, monkeypatch):
         assert full[c].fillna(0.0).dtype.kind == "f"
 
 
+def test_log_daily_sentiment_skips_rewrite_when_unchanged(tmp_path, monkeypatch):
+    """같은 값을 다시 기록하면 파일을 건드리지 않아야 한다.
+
+    parquet은 같은 내용을 다시 써도 바이트가 달라진다. 이 디렉토리는 git으로 추적하므로
+    그냥 덮어쓰면 앱을 켤 때마다 무의미한 변경으로 잡힌다 — 실제로 그런 커밋이 있었다.
+    """
+    monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
+    code, d = "SAMECODE", pd.Timestamp("2026-01-01")
+    kwargs = dict(positive_count=6, negative_count=1, article_count=10, date=d)
+
+    news.log_daily_sentiment(code, 0.9, **kwargs)
+    path = tmp_path / f"{code}.parquet"
+    first = path.read_bytes()
+
+    news.log_daily_sentiment(code, 0.9, **kwargs)  # 완전히 동일한 값
+    assert path.read_bytes() == first, "값이 같은데 파일이 재작성됨"
+
+    # 값이 실제로 달라지면 당연히 갱신돼야 한다
+    news.log_daily_sentiment(code, 0.4, **kwargs)
+    assert path.read_bytes() != first
+    assert news.sentiment_history(code).iloc[0] == pytest.approx(0.4)
+
+
+def test_log_daily_sentiment_rewrites_when_counts_filled_in(tmp_path, monkeypatch):
+    """카운트가 None이던 옛 기록에 실제 값이 들어오면 갱신돼야 한다 (건너뛰면 안 됨)."""
+    monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
+    code, d = "UPGRADE", pd.Timestamp("2026-01-01")
+
+    news.log_daily_sentiment(code, 0.9, date=d)  # 카운트 없이 기록 (옛 방식)
+    news.log_daily_sentiment(code, 0.9, positive_count=6, negative_count=1, article_count=10, date=d)
+
+    full = news.sentiment_history_full(code)
+    assert full["positive_count"].iloc[0] == 6
+    assert full["article_count"].iloc[0] == 10
+
+
+def test_log_daily_sentiment_appends_new_date(tmp_path, monkeypatch):
+    """날짜가 다르면 건너뛰지 않고 행이 늘어야 한다."""
+    monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
+    code = "MULTIDAY"
+    news.log_daily_sentiment(code, 0.5, date=pd.Timestamp("2026-01-01"))
+    news.log_daily_sentiment(code, 0.5, date=pd.Timestamp("2026-01-02"))  # 값은 같고 날짜만 다름
+    assert len(news.sentiment_history(code)) == 2
+
+
 def test_log_daily_sentiment_overwrites_same_date(tmp_path, monkeypatch):
     monkeypatch.setattr(news, "_SENTIMENT_LOG_DIR", tmp_path)
     code = "TESTCODE2"

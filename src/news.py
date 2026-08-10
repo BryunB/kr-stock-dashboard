@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
@@ -134,6 +135,38 @@ def _sentiment_log_path(code: str) -> Path:
     return _SENTIMENT_LOG_DIR / f"{code}.parquet"
 
 
+def _values_match(stored, incoming) -> bool:
+    """기록된 값과 새 값이 같은지. 양쪽 다 결측이면 같은 것으로 본다."""
+    stored_na, incoming_na = pd.isna(stored), pd.isna(incoming)
+    if stored_na or incoming_na:
+        return bool(stored_na and incoming_na)
+    return math.isclose(float(stored), float(incoming), rel_tol=1e-12, abs_tol=1e-12)
+
+
+def _already_logged(
+    existing: pd.DataFrame,
+    date: pd.Timestamp,
+    avg_score: float,
+    positive_count: int | None,
+    negative_count: int | None,
+    article_count: int | None,
+) -> bool:
+    """해당 날짜에 완전히 같은 값이 이미 기록돼 있으면 True (재작성 생략용)."""
+    match = existing[existing["date"] == date]
+    if len(match) != 1:
+        return False
+    stored = match.iloc[0]
+    return all(
+        _values_match(stored.get(col), value)
+        for col, value in (
+            ("avg_sentiment", avg_score),
+            ("positive_count", positive_count),
+            ("negative_count", negative_count),
+            ("article_count", article_count),
+        )
+    )
+
+
 def log_daily_sentiment(
     code: str,
     avg_score: float,
@@ -153,6 +186,10 @@ def log_daily_sentiment(
 
     positive_count/negative_count/article_count는 predictor.py의 심층 모델
     (train_and_predict_advanced)이 쓰는 추가 피처다 — 기본 모델은 avg_sentiment만 쓴다.
+
+    이미 같은 날짜에 같은 값이 기록돼 있으면 파일을 아예 건드리지 않는다. parquet은
+    같은 내용을 다시 써도 바이트가 달라져서, 그냥 덮어쓰면 앱을 켤 때마다 이 파일이
+    변경된 것으로 잡힌다 (이 디렉토리는 git으로 추적하므로 무의미한 diff가 쌓인다).
     """
     date = (date or pd.Timestamp.today()).normalize()
     path = _sentiment_log_path(code)
@@ -169,6 +206,8 @@ def log_daily_sentiment(
     )
     if path.exists():
         existing = pd.read_parquet(path)
+        if _already_logged(existing, date, avg_score, positive_count, negative_count, article_count):
+            return
         existing = existing[existing["date"] != date]
         combined = pd.concat([existing, row], ignore_index=True).sort_values("date")
     else:
