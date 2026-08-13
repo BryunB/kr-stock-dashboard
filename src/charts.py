@@ -37,6 +37,8 @@ def build_chart(
     show_rsi: bool = False,
     show_macd: bool = False,
     index_overlays: dict[str, pd.Series] | None = None,
+    base_height: int = 520,
+    panel_height: int = 140,
 ) -> go.Figure:
     """df: indicators.add_all()을 거친 OHLCV+지표 DataFrame (컬럼: Open/High/Low/Close/Volume/sma*/rsi14/macd/signal).
 
@@ -170,7 +172,7 @@ def build_chart(
 
     fig.update_layout(
         title=title,
-        height=520 + 140 * (rows - 1),
+        height=base_height + panel_height * (rows - 1),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=40, r=20, t=70, b=30),

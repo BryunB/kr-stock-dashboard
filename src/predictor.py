@@ -93,6 +93,14 @@ def train_and_predict(
         }
 
     feat = _build_features(price_df, sentiment_hist)
+    # 거래정지 등으로 거래량/시가가 0인 날엔 vol_chg 등의 비율 피처가 inf가 될 수 있다 —
+    # feat 자체를 여기서 정제해야 아래 학습용 data뿐 아니라 최신 예측행(latest_feat)도 같이
+    # 깨끗해진다. inf -> NaN으로 바꾼 뒤 ffill하면, 거래정지로 오늘 값이 깨진 종목은
+    # 마지막으로 유효했던 지표값을 그대로 이어받는다(지표가 "멈춰있다"고 보는 게 합리적).
+    # 워밍업 구간(예: sma60의 첫 60행)의 선행 NaN은 앞에 채울 값이 없어 ffill로도 안 채워지고,
+    # 그대로 남아 아래 dropna(subset=tech_cols)에서 기존과 동일하게 걸러진다.
+    feat = feat.replace([np.inf, -np.inf], np.nan)
+    feat = feat.ffill()
     target = close.shift(-horizon) / close - 1  # horizon일 뒤 수익률
 
     feature_cols = list(feat.columns)
@@ -100,6 +108,9 @@ def train_and_predict(
 
     data = feat.copy()
     data["target"] = target
+    # feat은 위에서 이미 정제됐지만 target(미래 수익률)은 별도 계산값이라 여기 포함 안 됨 —
+    # close가 0에 가까워 target이 inf가 되는 경우를 대비해 남겨둔다.
+    data = data.replace([np.inf, -np.inf], np.nan)
     data = data.dropna(subset=tech_cols)  # 지표 워밍업 구간 제거 (news_sentiment는 0으로 이미 채워짐)
 
     usable = data.dropna(subset=["target"])  # 미래 target이 없는 마지막 horizon행 제외
@@ -123,6 +134,9 @@ def train_and_predict(
 
     # 실제 예측: 가장 최근(마지막) 완비된 피처 행을 사용
     latest_feat = feat.iloc[[-1]][feature_cols]
+    # feat이 위에서 이미 정제됐으므로 평소엔 no-op이지만, 극단적으로 짧은 이력 등
+    # ffill로도 못 채운 NaN이 남는 경우를 대비한 최후의 방어선.
+    latest_feat = latest_feat.fillna(0.0)
     predicted_return = float(model.predict(latest_feat)[0])
     last_close = float(close.iloc[-1])
     predicted_price = last_close * (1 + predicted_return)
@@ -273,6 +287,14 @@ def train_and_predict_advanced(
         }
 
     feat = _build_features_advanced(price_df, sentiment_hist_full)
+    # 거래정지 등으로 거래량/시가가 0인 날엔 co_gap, vol_sma_ratio 등의 비율 피처가 inf가 될 수
+    # 있다 — feat 자체를 여기서 정제해야 아래 학습용 data뿐 아니라 최신 예측행(latest_feat)도
+    # 같이 깨끗해진다. inf -> NaN으로 바꾼 뒤 ffill하면, 거래정지로 오늘 값이 깨진 종목은
+    # 마지막으로 유효했던 지표값을 그대로 이어받는다(지표가 "멈춰있다"고 보는 게 합리적).
+    # 워밍업 구간의 선행 NaN은 앞에 채울 값이 없어 ffill로도 안 채워지고, 그대로 남아 아래
+    # dropna(subset=tech_cols)에서 기존과 동일하게 걸러진다.
+    feat = feat.replace([np.inf, -np.inf], np.nan)
+    feat = feat.ffill()
     target = close.shift(-horizon) / close - 1
 
     feature_cols = list(feat.columns)
@@ -280,8 +302,8 @@ def train_and_predict_advanced(
 
     data = feat.copy()
     data["target"] = target
-    # 거래정지 등으로 거래량이 0인 날엔 vol_sma_ratio 등의 비율 피처가 inf가 될 수 있다 —
-    # NaN으로 바꿔서 아래 dropna에 같이 걸리게 한다 (기본 모델보다 나눗셈 피처가 많아 필요).
+    # feat은 위에서 이미 정제됐지만 target(미래 수익률)은 별도 계산값이라 여기 포함 안 됨 —
+    # close가 0에 가까워 target이 inf가 되는 경우를 대비해 남겨둔다.
     data = data.replace([np.inf, -np.inf], np.nan)
     data = data.dropna(subset=tech_cols)  # 지표 워밍업 구간 제거 (뉴스 피처는 이미 0으로 채워짐)
 
@@ -330,6 +352,9 @@ def train_and_predict_advanced(
     final_model = _model_specs()[best_name]()
     final_model.fit(X, y)
     latest_feat = feat.iloc[[-1]][feature_cols]
+    # feat이 위에서 이미 정제됐으므로 평소엔 no-op이지만, 극단적으로 짧은 이력 등
+    # ffill로도 못 채운 NaN이 남는 경우를 대비한 최후의 방어선.
+    latest_feat = latest_feat.fillna(0.0)
     predicted_return = float(final_model.predict(latest_feat)[0])
     last_close = float(close.iloc[-1])
     predicted_price = last_close * (1 + predicted_return)

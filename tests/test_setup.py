@@ -75,6 +75,24 @@ def test_add_all_preserves_index():
     assert list(df.columns) == ["Close"]  # 원본 불변
 
 
+def test_find_symbol_matches_code_or_name(monkeypatch):
+    """find_symbol이 종목코드로도 검색되는지 확인 (이름만 검색되던 버그의 회귀 테스트)."""
+    fake_listing = pd.DataFrame(
+        {
+            "Code": ["005930", "000660", "005935"],
+            "Name": ["삼성전자", "SK하이닉스", "삼성전자우"],
+            "Market": ["KOSPI", "KOSPI", "KOSPI"],
+        }
+    )
+    monkeypatch.setattr(data_loader, "get_listing", lambda market="KRX", use_cache=True: fake_listing)
+
+    by_code = data_loader.find_symbol("005930")
+    assert list(by_code["Code"]) == ["005930"]
+
+    by_name = data_loader.find_symbol("삼성")
+    assert set(by_name["Code"]) == {"005930", "005935"}
+
+
 # ----------------------------------------------------------- 네트워크 테스트
 
 

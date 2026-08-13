@@ -87,9 +87,19 @@ def get_listing(market: str = "KRX", use_cache: bool = True) -> pd.DataFrame:
 
 
 def find_symbol(keyword: str, market: str = "KRX") -> pd.DataFrame:
-    """종목명 일부로 심볼을 찾는다. 예: find_symbol('삼성')"""
+    """종목코드 또는 종목명 일부로 심볼을 찾는다. 예: find_symbol('삼성'), find_symbol('005930')"""
     listing = get_listing(market)
     name_col = next((c for c in ("Name", "Symbol") if c in listing.columns), listing.columns[0])
-    hit = listing[listing[name_col].astype(str).str.contains(keyword, case=False, na=False)]
+    name_hit = listing[listing[name_col].astype(str).str.contains(keyword, case=False, na=False)]
+
+    # 코드 컬럼(6자리 티커 등)도 부분 일치로 함께 검색한다 — 이게 없으면 "005930"처럼
+    # 코드를 그대로 입력해도 검색 결과가 항상 비어버린다.
+    code_col = next((c for c in ("Code", "Symbol") if c in listing.columns), None)
+    if code_col is not None:
+        code_hit = listing[listing[code_col].astype(str).str.contains(keyword, case=False, na=False)]
+        hit = pd.concat([code_hit, name_hit]).drop_duplicates()
+    else:
+        hit = name_hit
+
     keep = [c for c in ("Code", "Symbol", "Name", "Market", "Sector") if c in hit.columns]
     return hit[keep] if keep else hit

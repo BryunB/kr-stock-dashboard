@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import html
+
 import pandas as pd
 import streamlit as st
 
@@ -42,6 +44,16 @@ def _change_html(diff: float, pct: float, *, soft: bool = False) -> str:
     )
 
 
+def _section_title(text: str) -> None:
+    """카드(박스) 제목을 본문과 구분되는 강조 바로 그린다 — 4개 영역 제목에 공통으로 쓴다."""
+    st.markdown(
+        "<div style='background:rgba(127,127,127,0.16);border-radius:6px;"
+        "padding:0.4rem 0.7rem;margin-bottom:0.5rem;font-weight:700;"
+        f"font-size:1.05rem;line-height:1.3;'>{text}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 @st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="전종목 시세 불러오는 중...")
 def _screen(market: str, days_back: int, min_marcap: float, min_volume: float) -> pd.DataFrame:
     return screener.screen(market=market, days_back=days_back, min_marcap=min_marcap, min_volume=min_volume)
@@ -62,330 +74,334 @@ def _dart(code: str) -> pd.DataFrame:
     return dart.fetch_disclosures(code)
 
 
-st.title("📊 주가 요약")
-
-# ------------------------------------------------------------------ 사이드바: 공통 필터
-with st.sidebar:
-    st.header("공통 필터")
-    st.caption("아래 조건은 세 탭(상승률·거래대금·시가총액)에 모두 적용됩니다.")
-    market = st.selectbox(
-        "시장",
-        ["ALL", "KOSPI", "KOSDAQ"],
-        format_func=lambda m: {"ALL": "전체 (KOSPI+KOSDAQ)", "KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}[m],
-    )
-    top_n = st.slider("표시 개수", 10, 100, 30, step=10)
-    min_marcap_eok = st.slider("최소 시가총액 (억원)", 0, 5000, 300, step=50)
-    min_volume = st.number_input("최소 거래량(주)", min_value=0, value=1000, step=1000)
-
-    if st.button("🔄 새로고침 (캐시 초기화)"):
-        st.cache_data.clear()
-        dl.clear_cache()
-        st.rerun()
-
-# ------------------------------------------------------------------ 스크리닝 테이블 (조건별 탭)
-try:
-    universe = _screen(market, 7, min_marcap_eok * 1e8, float(min_volume))
-except Exception as e:
-    st.error(f"스크리닝 데이터를 불러오지 못했습니다: {e}")
-    st.stop()
-
-market_label = "KOSPI+KOSDAQ" if market == "ALL" else market
-
-_TABLE_COLS = ["Code", "종목명", "시장", "종가", "일간%", "주간%", "거래량", "거래대금", "시가총액"]
-_COL_CONFIG = {
-    "종가": st.column_config.NumberColumn(format="%,d원"),
-    "일간%": st.column_config.NumberColumn(format="%.2f%%"),
-    "주간%": st.column_config.NumberColumn(format="%.2f%%"),
-    "거래량": st.column_config.NumberColumn(format="%,d주"),
-    "거래대금": st.column_config.NumberColumn(format="%,.0f억원"),
-    "시가총액": st.column_config.NumberColumn(format="%,.0f억원"),
-}
+def _safe_predict(price_df: pd.DataFrame, horizon: int, sentiment_hist: pd.Series | None) -> dict:
+    """train_and_predict()가 예기치 못한 예외를 던져도 페이지 전체가 죽지 않도록 감싼다."""
+    try:
+        return predictor.train_and_predict(price_df, horizon=horizon, sentiment_hist=sentiment_hist)
+    except Exception as e:
+        return {"error": f"예측 중 오류가 발생했습니다: {e}"}
 
 
-def _render_table(ranked: pd.DataFrame, key: str):
-    """스크리닝 결과 테이블을 그리고 선택 이벤트를 돌려준다. 억원 단위 변환은 여기서만."""
-    display = ranked.rename(
-        columns={
-            "Name": "종목명",
-            "Market": "시장",
-            "Close": "종가",
-            "DailyChangeRatio": "일간%",
-            "WeeklyChangeRatio": "주간%",
-            "Volume": "거래량",
-            "Amount": "거래대금",
-            "Marcap": "시가총액",
+def _safe_predict_advanced(
+    price_df: pd.DataFrame, horizon: int, sentiment_hist_full: pd.DataFrame | None
+) -> dict:
+    """train_and_predict_advanced()용 _safe_predict() 짝 — 심층 학습 버튼도 동일하게 보호한다."""
+    try:
+        return predictor.train_and_predict_advanced(
+            price_df, horizon=horizon, sentiment_hist_full=sentiment_hist_full
+        )
+    except Exception as e:
+        return {"error": f"예측 중 오류가 발생했습니다: {e}"}
+
+
+# ------------------------------------------------------------------ 컴팩트 레이아웃용 전역 CSS
+# 네 영역(주가요약·종목상세·가격예측·뉴스&공시) 모두 같은 폰트 크기를 쓴다 — 영역별로 다른
+# 크기를 주지 않고 아래 규칙 하나로 전부 통일한다.
+st.markdown(
+    """
+<style>
+.block-container {padding-top: 1rem; padding-bottom: 1rem;}
+h1, h2, h3, h4, h5 {margin-top: 0.1rem; margin-bottom: 0.3rem;}
+div[data-testid="stVerticalBlock"] {gap: 0.45rem;}
+[data-testid="stMetricValue"] {font-size: 1.25rem;}
+[data-testid="stMetricLabel"] {font-size: 0.88rem;}
+[data-testid="stMetricDelta"] {font-size: 0.88rem;}
+.stTabs [data-baseweb="tab-list"] {gap: 4px;}
+.stTabs [data-baseweb="tab"] {padding: 4px 10px; font-size: 0.92rem;}
+div[data-testid="stWidgetLabel"] p {font-size: 0.88rem; margin-bottom: 0.1rem;}
+.stButton button {padding: 0.25rem 0.7rem; font-size: 0.88rem;}
+hr {margin: 0.5rem 0;}
+p, .stCaption, .stMarkdown, label, span {font-size: 0.92rem;}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+st.markdown("##### 📊 주가 스크리닝 대시보드")
+
+_SENT_COLOR = {"긍정": UP_COLOR, "중립": FLAT_COLOR, "부정": DOWN_COLOR}  # 상승=빨강, 하락=파랑
+
+left_col, right_col = st.columns([3, 7], gap="medium")
+
+# ==================================================================== 좌측 (30%): 주가 요약 + 가격 예측
+# 위·아래 두 쌍(주가요약↔종목상세, 가격예측↔뉴스&공시)의 시작 줄을 픽셀 단위로 정확히
+# 맞추려면, 한쪽 내용 높이를 추정해 다른 쪽에 맞추는 방식(근사치)으론 미세한 오차가 남는다.
+# 대신 각 쌍의 두 박스에 "동일한" 고정 높이를 줘서 애초에 오차가 생길 수 없게 한다.
+_TOP_ROW_HEIGHT = 800  # 종목상세(우측 상단) 내용이 다 들어가고도 여유가 있도록 넉넉히 잡은 값
+_BOTTOM_ROW_HEIGHT = 380  # 가격예측 기준 — 뉴스&공시도 동일하게 맞춘다
+
+with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
+    _section_title("📊 주가 요약")
+
+    # ---------------------------------------------------------- 공통 필터 (구 사이드바를 컴팩트한 행으로)
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        market = st.selectbox(
+            "시장",
+            ["ALL", "KOSPI", "KOSDAQ"],
+            format_func=lambda m: {"ALL": "전체", "KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}[m],
+        )
+    with fc2:
+        top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
+
+    fc3, fc4, fc5 = st.columns([1.3, 1.3, 0.6])
+    with fc3:
+        min_marcap_eok = st.selectbox(
+            "최소 시총",
+            [0, 100, 300, 500, 1000, 3000],
+            index=2,
+            format_func=lambda v: f"{v}억+" if v else "시총 전체",
+        )
+    with fc4:
+        min_volume = st.selectbox(
+            "최소 거래량",
+            [0, 1000, 5000, 10000, 50000],
+            index=1,
+            format_func=lambda v: f"{v:,}주+" if v else "거래량 전체",
+        )
+    with fc5:
+        st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
+        if st.button("🔄", help="새로고침 (캐시 초기화)"):
+            st.cache_data.clear()
+            dl.clear_cache()
+            st.rerun()
+
+    try:
+        universe = _screen(market, 7, min_marcap_eok * 1e8, float(min_volume))
+    except Exception as e:
+        st.error(f"스크리닝 데이터를 불러오지 못했습니다: {e}")
+        st.stop()
+
+    market_label = "KOSPI+KOSDAQ" if market == "ALL" else market
+
+    def _render_table(ranked: pd.DataFrame, key: str, value_col: str, value_label: str, fmt: str, scale: float = 1.0):
+        """스크리닝 결과를 컴팩트 3열(종목명·종가·값)로 그리고 선택 이벤트를 돌려준다."""
+        display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
+        display[value_label] = ranked[value_col] / scale
+        col_config = {
+            "종가": st.column_config.NumberColumn(format="%,d원"),
+            value_label: st.column_config.NumberColumn(format=fmt),
         }
-    ).copy()
-    display["거래대금"] = display["거래대금"] / 1e8
-    display["시가총액"] = display["시가총액"] / 1e8
-    return st.dataframe(
-        display[_TABLE_COLS],
-        width="stretch",
-        hide_index=True,
-        height=min(38 * (len(display) + 1), 640),
-        column_config=_COL_CONFIG,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=key,
-    )
+        return st.dataframe(
+            display[["종목명", "종가", value_label]],
+            width="stretch",
+            hide_index=True,
+            height=min(30 * (len(display) + 1), 260),
+            column_config=col_config,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=key,
+        )
 
+    rise_tab, amount_tab, marcap_tab = st.tabs(["📈 상승률", "💰 거래대금", "🏢 시가총액"])
+    picks = []  # (탭 key, 정렬된 df, 선택 이벤트)
 
-rise_tab, amount_tab, marcap_tab = st.tabs(["📈 상승률", "💰 거래대금", "🏢 시가총액"])
-picks = []  # (탭 key, 정렬된 df, 선택 이벤트)
+    with rise_tab:
+        # 등락률은 '어느 기간을 볼지 / 오름·내림 중 무엇을 볼지'가 의미가 있어서 이 탭에만 컨트롤을 둔다.
+        c1, c2 = st.columns(2)
+        with c1:
+            basis = st.radio("기준", ["일간", "주간"], horizontal=True)
+        with c2:
+            direction = st.radio("방향", ["상승", "하락"], horizontal=True)
+        basis_col = "DailyChangeRatio" if basis == "일간" else "WeeklyChangeRatio"
+        ranked_rise = screener.top_movers(universe, by=basis_col, n=top_n, ascending=(direction == "하락"))
+        st.caption(f"{market_label} {len(universe):,}종목 중 {basis} {direction}률 상위 {len(ranked_rise)}개")
+        picks.append(
+            (
+                "tbl_rise",
+                ranked_rise,
+                _render_table(ranked_rise, "tbl_rise", basis_col, f"{basis}%", "%.2f%%"),
+            )
+        )
 
-with rise_tab:
-    # 등락률은 '어느 기간을 볼지 / 오름·내림 중 무엇을 볼지'가 의미가 있어서 이 탭에만 컨트롤을 둔다.
-    c1, c2 = st.columns(2)
-    with c1:
-        basis = st.radio("정렬 기준", ["일간", "주간"], horizontal=True)
-    with c2:
-        direction = st.radio("방향", ["상승률 높은순", "하락률 큰순"], horizontal=True)
-    basis_col = "DailyChangeRatio" if basis == "일간" else "WeeklyChangeRatio"
-    ranked_rise = screener.top_movers(universe, by=basis_col, n=top_n, ascending=(direction == "하락률 큰순"))
-    st.caption(f"{market_label} 전체 {len(universe):,}종목 중 {basis} {direction} 상위 {len(ranked_rise)}개")
-    picks.append(("tbl_rise", ranked_rise, _render_table(ranked_rise, "tbl_rise")))
+    with amount_tab:
+        ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
+        st.caption(f"{market_label} {len(universe):,}종목 중 거래대금 상위 {len(ranked_amount)}개")
+        picks.append(
+            (
+                "tbl_amount",
+                ranked_amount,
+                _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "%,.0f억원", scale=1e8),
+            )
+        )
 
-with amount_tab:
-    ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
-    st.caption(
-        f"{market_label} 전체 {len(universe):,}종목 중 거래대금 상위 {len(ranked_amount)}개 "
-        "— 그날 실제로 돈이 가장 많이 오간 종목입니다."
-    )
-    picks.append(("tbl_amount", ranked_amount, _render_table(ranked_amount, "tbl_amount")))
+    with marcap_tab:
+        ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
+        st.caption(f"{market_label} {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
+        picks.append(
+            (
+                "tbl_marcap",
+                ranked_marcap,
+                _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액", "%,.0f억원", scale=1e8),
+            )
+        )
 
-with marcap_tab:
-    ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
-    st.caption(f"{market_label} 전체 {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
-    picks.append(("tbl_marcap", ranked_marcap, _render_table(ranked_marcap, "tbl_marcap")))
-
-# 세 테이블의 선택 상태는 탭을 옮겨도 각자 남아 있다. 매 rerun마다 전부 "선택됨"으로 보이므로
-# 그대로 반영하면 마지막 탭이 항상 이겨버린다 — 직전에 처리한 값과 달라진 탭만 반영한다.
-for tbl_key, ranked_df, event in picks:
-    if not event.selection.rows:
-        continue
-    picked = ranked_df.iloc[event.selection.rows[0]]
-    if st.session_state.get(f"_last_{tbl_key}") != picked["Code"]:
-        st.session_state[f"_last_{tbl_key}"] = picked["Code"]
-        st.session_state["selected_code"] = picked["Code"]
-        st.session_state["selected_name"] = picked["Name"]
-
-st.divider()
-
-# ------------------------------------------------------------------ 종목 상세 차트
-st.subheader("종목 상세")
-st.caption("위 표에서 종목을 클릭하면 아래 차트가 해당 종목으로 바뀝니다.")
-
-search_col, period_col, idx_col = st.columns([2, 1, 2])
-with search_col:
-    manual = st.text_input("종목코드 또는 이름으로 검색 (예: 005930, 삼성전자)", value="")
-with period_col:
-    period_label = st.selectbox("조회 기간", list(DATE_RANGES.keys()), index=3)
-with idx_col:
-    idx_sel = st.multiselect("지수 비교", list(config.INDICES.keys()), default=["KOSPI"])
-
-selected_code = st.session_state.get("selected_code")
-selected_name = st.session_state.get("selected_name", "")
-
-if manual.strip():
-    hits = dl.find_symbol(manual.strip())
-    code_col = "Code" if "Code" in hits.columns else "Symbol"
-    if not hits.empty:
-        options = {f"{row[code_col]} · {row['Name']}": row[code_col] for _, row in hits.head(20).iterrows()}
-        pick = st.selectbox("검색 결과", list(options.keys()))
-        selected_code = options[pick]
-        selected_name = pick.split(" · ", 1)[1]
-    else:
-        st.warning("검색 결과가 없습니다.")
-
-if not selected_code:
-    selected_code, selected_name = "005930", "삼성전자"
-
-days_back = DATE_RANGES[period_label]
-start_date = (
-    config.DEFAULT_START
-    if days_back is None
-    else (pd.Timestamp.today() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d")
-)
-
-price_df = _price(selected_code, start_date)
-if price_df.empty:
-    st.error(f"'{selected_code}' 가격 데이터를 찾을 수 없습니다.")
-    st.stop()
-
-# ------------------------------------------------------------------ 시세 요약 (원 단위)
-_last = price_df.iloc[-1]
-_last_date = price_df.index[-1]
-_close = float(_last["Close"])
-_prev_close = float(price_df["Close"].iloc[-2]) if len(price_df) >= 2 else None
-
-# 거래대금·시가총액은 KRX 스냅샷(universe)에 정확한 값이 있다 (거래대금은 체결가마다 다르므로
-# 종가×거래량으로는 정확히 못 구한다). 필터에 걸려 빠졌거나 해외 종목이면 없으므로 그때만 근사한다.
-# 단 두 소스는 갱신 시점이 달라서, 장중에는 같은 종목인데 거래량이 서로 어긋날 수 있다 —
-# 그 경우 아래 캡션에 "갱신 시점 다름"을 명시해 사용자가 오해하지 않게 한다.
-_urow = universe[universe["Code"] == selected_code]
-_amount_approx = _urow.empty
-_amount_stale = False
-if not _urow.empty:
-    _amount, _marcap = float(_urow.iloc[0]["Amount"]), float(_urow.iloc[0]["Marcap"])
-    _snap_vol = float(_urow.iloc[0]["Volume"])
-    _live_vol = float(_last["Volume"])
-    _amount_stale = _live_vol > 0 and abs(_snap_vol - _live_vol) / _live_vol > 0.01
-else:
-    _amount, _marcap = _close * float(_last["Volume"]), None
-
-st.markdown(f"#### {selected_name} ({selected_code})")
-
-_r1 = st.columns(4)
-_r1[0].metric("현재가 (종가)", f"{_close:,.0f}원")
-if _prev_close:
-    _diff = _close - _prev_close
-    # 실제 체결된 시세이므로 캔들 차트와 같은 원색을 쓴다 (예측값만 파스텔).
-    _r1[0].markdown(
-        _change_html(_diff, _diff / _prev_close * 100),
-        unsafe_allow_html=True,
-    )
-_r1[1].metric("시가", f"{float(_last['Open']):,.0f}원")
-_r1[2].metric("고가", f"{float(_last['High']):,.0f}원")
-_r1[3].metric("저가", f"{float(_last['Low']):,.0f}원")
-
-_r2 = st.columns(4)
-_r2[0].metric("전일 종가", f"{_prev_close:,.0f}원" if _prev_close else "—")
-_r2[1].metric("일중 변동폭", f"{float(_last['High']) - float(_last['Low']):,.0f}원")
-_r2[2].metric("거래량", f"{float(_last['Volume']):,.0f}주")
-_r2[3].metric("거래대금", f"{_amount / 1e8:,.0f}억원")
-
-_notes = [f"{_last_date:%Y-%m-%d (%a)} 기준"]
-if _marcap:
-    _notes.append(f"시가총액 {_marcap / 1e8:,.0f}억원")
-if _amount_approx:
-    _notes.append("거래대금은 종가×거래량 추정치")
-elif _amount_stale:
-    # 장중에는 시세 피드와 KRX 스냅샷의 갱신 시점이 달라 거래량/거래대금이 서로 안 맞을 수 있다.
-    _notes.append("거래대금·시가총액은 KRX 스냅샷 기준이라 장중에는 거래량과 시점이 다를 수 있음")
-_notes.append("상승=빨강 / 하락=파랑")
-st.caption(" · ".join(_notes))
-
-enriched = ind.add_all(price_df)
-
-# 차트(좌, 넓게) + 지표 체크박스(우측 하단)
-chart_col, indicator_col = st.columns([4, 1])
-
-with indicator_col:
-    st.markdown("**지표 선택**")
-    st.container(height=260, border=False)  # 체크박스를 우측 하단쯤에 오도록 밀어내는 여백
-    show_sma5 = st.checkbox("SMA5", value=False)
-    show_sma20 = st.checkbox("SMA20", value=True)
-    show_sma60 = st.checkbox("SMA60", value=True)
-    show_sma120 = st.checkbox("SMA120", value=False)
-    show_bb = st.checkbox("볼린저밴드", value=False)
-    show_vol = st.checkbox("거래량", value=True)
-    show_rsi = st.checkbox("RSI", value=False)
-    show_macd = st.checkbox("MACD", value=False)
-
-sma_windows = [w for w, on in [(5, show_sma5), (20, show_sma20), (60, show_sma60), (120, show_sma120)] if on]
-for w in sma_windows:
-    col = f"sma{w}"
-    if col not in enriched.columns:
-        enriched[col] = ind.sma(enriched["Close"], w)
-
-overlays = {}
-for label in idx_sel:
-    idx_df = _price(label, start_date)
-    if not idx_df.empty:
-        overlays[label] = idx_df["Close"]
-
-fig = charts.build_chart(
-    enriched,
-    title=f"{selected_name} ({selected_code})",
-    sma_windows=tuple(sma_windows),
-    show_bollinger=show_bb,
-    show_volume=show_vol,
-    show_rsi=show_rsi,
-    show_macd=show_macd,
-    index_overlays=overlays or None,
-)
-with chart_col:
-    st.plotly_chart(fig, width="stretch")
-
-# ------------------------------------------------------------------ 성과 요약
-summary = ind.summary(price_df["Close"])
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("기간 수익률", f"{summary['total_return'] * 100:.1f}%")
-m2.metric("CAGR", f"{summary['cagr'] * 100:.1f}%")
-m3.metric("연변동성", f"{summary['volatility'] * 100:.1f}%")
-m4.metric("샤프", f"{summary['sharpe']:.2f}")
-m5.metric("MDD", f"{summary['max_drawdown'] * 100:.1f}%")
-
-# ------------------------------------------------------------------ 가격 예측
-st.divider()
-st.subheader("가격 예측")
-st.caption(
-    "⚠️ 과거 가격·기술지표(+뉴스 감성)로 그때그때 학습한 통계 모델의 참고용 추정치입니다. "
-    "투자 조언이 아니며 실제 가격과 다를 수 있습니다."
-)
-
-# 예측 피처로 쓸 뉴스 감성 히스토리를 먼저 갱신한다 (조회 실패해도 페이지 전체가 죽지 않도록 방어).
-try:
-    news.log_sentiment_from_news(selected_code, _news(selected_code, 10))
-except Exception:
-    pass
-sentiment_hist = news.sentiment_history(selected_code)
-
-pred_1d = predictor.train_and_predict(price_df, horizon=1, sentiment_hist=sentiment_hist)
-pred_5d = predictor.train_and_predict(price_df, horizon=5, sentiment_hist=sentiment_hist)
-
-pcol1, pcol2 = st.columns(2)
-for col, pred, label in [
-    (pcol1, pred_1d, "다음 거래일 종가"),
-    (pcol2, pred_5d, "5거래일 후 (약 1주일) 종가"),
-]:
-    with col:
-        st.markdown(f"**{label}**")
-        if "error" in pred:
-            st.info(pred["error"])
+    # 세 테이블의 선택 상태는 탭을 옮겨도 각자 남아 있다. 매 rerun마다 전부 "선택됨"으로 보이므로
+    # 그대로 반영하면 마지막 탭이 항상 이겨버린다 — 직전에 처리한 값과 달라진 탭만 반영한다.
+    for tbl_key, ranked_df, event in picks:
+        if not event.selection.rows:
             continue
-        delta = pred["predicted_price"] - pred["last_close"]
-        st.metric(
-            pred["target_date"].strftime("%Y-%m-%d (%a)"),
-            f"{pred['predicted_price']:,.0f}원",
-        )
-        st.markdown(
-            _change_html(delta, pred["predicted_return"] * 100, soft=True),
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            f"홀드아웃 검증 {pred['n_test']}거래일 기준 · "
-            f"MAE {pred['mae']:,.0f}원 · MAPE {pred['mape'] * 100:.2f}% · "
-            f"방향 적중률 {pred['directional_accuracy'] * 100:.0f}%"
+        picked = ranked_df.iloc[event.selection.rows[0]]
+        if st.session_state.get(f"_last_{tbl_key}") != picked["Code"]:
+            st.session_state[f"_last_{tbl_key}"] = picked["Code"]
+            st.session_state["selected_code"] = picked["Code"]
+            st.session_state["selected_name"] = picked["Name"]
+
+# ==================================================================== 우측 (70%): 종목 상세
+with right_col:
+    with st.container(key="detail", border=True, height=_TOP_ROW_HEIGHT):
+        _detail_title = "📈 종목 상세"
+        if st.session_state.get("selected_code"):
+            _detail_title += f" · {st.session_state.get('selected_name', '')}"
+        _section_title(_detail_title)
+
+        search_col, period_col, idx_col = st.columns([2, 1, 2])
+        with search_col:
+            manual = st.text_input("종목코드/이름 검색", value="", placeholder="예: 005930, 삼성전자")
+        with period_col:
+            period_label = st.selectbox("조회 기간", list(DATE_RANGES.keys()), index=3)
+        with idx_col:
+            idx_sel = st.multiselect("지수 비교", list(config.INDICES.keys()), default=["KOSPI"])
+
+        selected_code = st.session_state.get("selected_code")
+        selected_name = st.session_state.get("selected_name", "")
+
+        if manual.strip():
+            hits = dl.find_symbol(manual.strip())
+            code_col = "Code" if "Code" in hits.columns else "Symbol"
+            if not hits.empty:
+                options = {f"{row[code_col]} · {row['Name']}": row[code_col] for _, row in hits.head(20).iterrows()}
+                pick = st.selectbox("검색 결과", list(options.keys()))
+                selected_code = options[pick]
+                selected_name = pick.split(" · ", 1)[1]
+            else:
+                st.warning("검색 결과가 없습니다.")
+
+        if not selected_code:
+            selected_code, selected_name = "005930", "삼성전자"
+
+        days_back = DATE_RANGES[period_label]
+        start_date = (
+            config.DEFAULT_START
+            if days_back is None
+            else (pd.Timestamp.today() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d")
         )
 
-if st.button(
-    "🎯 정확한 예측 (심층 학습)",
-    help=(
-        "Ridge/RandomForest/GradientBoosting을 시계열 교차검증으로 비교해 가장 좋은 모델로 다시 "
-        "예측합니다. 조회 기간과 무관하게 보유한 전체 기간 데이터를 쓰며, 기본 예측보다 시간이 더 걸립니다."
-    ),
-):
-    with st.spinner("여러 모델을 교차검증하며 심층 학습하는 중... (시간이 다소 걸립니다)"):
-        full_price_df = _price(selected_code, config.DEFAULT_START)
-        sentiment_hist_full = news.sentiment_history_full(selected_code)
-        st.session_state["adv_pred"] = {
-            "code": selected_code,
-            "1d": predictor.train_and_predict_advanced(
-                full_price_df, horizon=1, sentiment_hist_full=sentiment_hist_full
-            ),
-            "5d": predictor.train_and_predict_advanced(
-                full_price_df, horizon=5, sentiment_hist_full=sentiment_hist_full
-            ),
-        }
+        price_df = _price(selected_code, start_date)
+        if price_df.empty:
+            st.error(f"'{selected_code}' 가격 데이터를 찾을 수 없습니다.")
+            st.stop()
 
-adv_pred = st.session_state.get("adv_pred")
-if adv_pred and adv_pred["code"] == selected_code:
-    st.markdown("**🎯 정확한 예측 (심층 학습) 결과**")
-    acol1, acol2 = st.columns(2)
+        # ------------------------------------------------------ 시세 요약 (원 단위)
+        _last = price_df.iloc[-1]
+        _last_date = price_df.index[-1]
+        _close = float(_last["Close"])
+        _prev_close = float(price_df["Close"].iloc[-2]) if len(price_df) >= 2 else None
+
+        # 거래대금·시가총액은 KRX 스냅샷(universe)에 정확한 값이 있다 (거래대금은 체결가마다 다르므로
+        # 종가×거래량으로는 정확히 못 구한다). 필터에 걸려 빠졌거나 해외 종목이면 없으므로 그때만 근사한다.
+        _urow = universe[universe["Code"] == selected_code]
+        _amount_approx = _urow.empty
+        _amount_stale = False
+        if not _urow.empty:
+            _amount, _marcap = float(_urow.iloc[0]["Amount"]), float(_urow.iloc[0]["Marcap"])
+            _snap_vol = float(_urow.iloc[0]["Volume"])
+            _live_vol = float(_last["Volume"])
+            _amount_stale = _live_vol > 0 and abs(_snap_vol - _live_vol) / _live_vol > 0.01
+        else:
+            _amount, _marcap = _close * float(_last["Volume"]), None
+
+        # 시세 요약 8개 항목을 한 줄로 (기존 2줄 → 1줄로 압축, 아낀 세로 공간은 아래 차트를 키우는 데 쓴다)
+        _r1 = st.columns(8)
+        _r1[0].metric("현재가", f"{_close:,.0f}원")
+        if _prev_close:
+            _diff = _close - _prev_close
+            # 실제 체결된 시세이므로 캔들 차트와 같은 원색을 쓴다 (예측값만 파스텔).
+            _r1[0].markdown(_change_html(_diff, _diff / _prev_close * 100), unsafe_allow_html=True)
+        _r1[1].metric("시가", f"{float(_last['Open']):,.0f}원")
+        _r1[2].metric("고가", f"{float(_last['High']):,.0f}원")
+        _r1[3].metric("저가", f"{float(_last['Low']):,.0f}원")
+        _r1[4].metric("전일종가", f"{_prev_close:,.0f}원" if _prev_close else "—")
+        _r1[5].metric("변동폭", f"{float(_last['High']) - float(_last['Low']):,.0f}원")
+        _r1[6].metric("거래량", f"{float(_last['Volume']):,.0f}주")
+        _r1[7].metric("거래대금", f"{_amount / 1e8:,.0f}억원")
+
+        _notes = [f"{_last_date:%Y-%m-%d (%a)} 기준"]
+        if _marcap:
+            _notes.append(f"시총 {_marcap / 1e8:,.0f}억원")
+        if _amount_approx:
+            _notes.append("거래대금 추정치")
+        elif _amount_stale:
+            _notes.append("거래대금·시총은 KRX 스냅샷 기준")
+        _notes.append("상승=빨강 / 하락=파랑")
+        st.caption(" · ".join(_notes))
+
+        enriched = ind.add_all(price_df)
+
+        # 지표 체크박스: 세로 사이드가 아니라 차트 위 가로 한 줄로 (공간 절약)
+        ic = st.columns(8)
+        show_sma5 = ic[0].checkbox("SMA5", value=False)
+        show_sma20 = ic[1].checkbox("SMA20", value=True)
+        show_sma60 = ic[2].checkbox("SMA60", value=True)
+        show_sma120 = ic[3].checkbox("SMA120", value=False)
+        show_bb = ic[4].checkbox("볼밴드", value=False)
+        show_vol = ic[5].checkbox("거래량", value=True)
+        show_rsi = ic[6].checkbox("RSI", value=False)
+        show_macd = ic[7].checkbox("MACD", value=False)
+
+        sma_windows = [w for w, on in [(5, show_sma5), (20, show_sma20), (60, show_sma60), (120, show_sma120)] if on]
+        for w in sma_windows:
+            col = f"sma{w}"
+            if col not in enriched.columns:
+                enriched[col] = ind.sma(enriched["Close"], w)
+
+        overlays = {}
+        for label in idx_sel:
+            idx_df = _price(label, start_date)
+            if not idx_df.empty:
+                overlays[label] = idx_df["Close"]
+
+        fig = charts.build_chart(
+            enriched,
+            title=f"{selected_name} ({selected_code})",
+            sma_windows=tuple(sma_windows),
+            show_bollinger=show_bb,
+            show_volume=show_vol,
+            show_rsi=show_rsi,
+            show_macd=show_macd,
+            index_overlays=overlays or None,
+            base_height=320,
+            panel_height=85,
+        )
+        st.plotly_chart(fig, width="stretch")
+
+        # ------------------------------------------------------ 성과 요약
+        summary = ind.summary(price_df["Close"])
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("수익률", f"{summary['total_return'] * 100:.1f}%")
+        m2.metric("CAGR", f"{summary['cagr'] * 100:.1f}%")
+        m3.metric("변동성", f"{summary['volatility'] * 100:.1f}%")
+        m4.metric("샤프", f"{summary['sharpe']:.2f}")
+        m5.metric("MDD", f"{summary['max_drawdown'] * 100:.1f}%")
+
+# ==================================================================== 좌측 하단: 가격 예측
+with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGHT):
+    _section_title("💹 가격 예측")
+    st.caption("⚠️ 참고용 추정치이며 투자 조언이 아닙니다.")
+
+    # 예측 피처로 쓸 뉴스 감성 히스토리를 먼저 갱신한다 (조회 실패해도 페이지 전체가 죽지 않도록 방어).
+    try:
+        news.log_sentiment_from_news(selected_code, _news(selected_code, 10))
+    except Exception:
+        pass
+    sentiment_hist = news.sentiment_history(selected_code)
+
+    pred_1d = _safe_predict(price_df, horizon=1, sentiment_hist=sentiment_hist)
+    pred_5d = _safe_predict(price_df, horizon=5, sentiment_hist=sentiment_hist)
+
+    pcol1, pcol2 = st.columns(2)
     for col, pred, label in [
-        (acol1, adv_pred["1d"], "다음 거래일 종가"),
-        (acol2, adv_pred["5d"], "5거래일 후 (약 1주일) 종가"),
+        (pcol1, pred_1d, "다음 거래일"),
+        (pcol2, pred_5d, "5거래일 후"),
     ]:
         with col:
             st.markdown(f"**{label}**")
@@ -393,119 +409,162 @@ if adv_pred and adv_pred["code"] == selected_code:
                 st.info(pred["error"])
                 continue
             delta = pred["predicted_price"] - pred["last_close"]
-            st.metric(
-                pred["target_date"].strftime("%Y-%m-%d (%a)"),
-                f"{pred['predicted_price']:,.0f}원",
-            )
-            st.markdown(
-                _change_html(delta, pred["predicted_return"] * 100, soft=True),
-                unsafe_allow_html=True,
-            )
+            st.metric(pred["target_date"].strftime("%m-%d(%a)"), f"{pred['predicted_price']:,.0f}원")
+            st.markdown(_change_html(delta, pred["predicted_return"] * 100, soft=True), unsafe_allow_html=True)
             st.caption(
-                f"선정 모델: {pred['best_model']} · 홀드아웃 검증 {pred['n_holdout']}거래일 기준 · "
-                f"MAE {pred['mae']:,.0f}원 · MAPE {pred['mape'] * 100:.2f}% · "
-                f"방향 적중률 {pred['directional_accuracy'] * 100:.0f}%"
+                f"검증{pred['n_test']}일 · MAE {pred['mae']:,.0f}원 · "
+                f"MAPE {pred['mape'] * 100:.1f}% · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
             )
 
-    with st.expander("심층 모델 상세 (교차검증 비교 · 피처 영향도)"):
-        for pred, label in [(adv_pred["1d"], "다음 거래일 모델"), (adv_pred["5d"], "5거래일 후 모델")]:
+    if st.button(
+        "🎯 정확한 예측 (심층 학습)",
+        help=(
+            "Ridge/RandomForest/GradientBoosting을 시계열 교차검증으로 비교해 가장 좋은 모델로 다시 "
+            "예측합니다. 조회 기간과 무관하게 보유한 전체 기간 데이터를 쓰며, 기본 예측보다 시간이 더 걸립니다."
+        ),
+    ):
+        with st.spinner("여러 모델을 교차검증하며 심층 학습하는 중..."):
+            full_price_df = _price(selected_code, config.DEFAULT_START)
+            sentiment_hist_full = news.sentiment_history_full(selected_code)
+            st.session_state["adv_pred"] = {
+                "code": selected_code,
+                "1d": _safe_predict_advanced(
+                    full_price_df, horizon=1, sentiment_hist_full=sentiment_hist_full
+                ),
+                "5d": _safe_predict_advanced(
+                    full_price_df, horizon=5, sentiment_hist_full=sentiment_hist_full
+                ),
+            }
+
+    adv_pred = st.session_state.get("adv_pred")
+    if adv_pred and adv_pred["code"] == selected_code:
+        st.markdown("**🎯 심층 학습 결과**")
+        acol1, acol2 = st.columns(2)
+        for col, pred, label in [
+            (acol1, adv_pred["1d"], "다음 거래일"),
+            (acol2, adv_pred["5d"], "5거래일 후"),
+        ]:
+            with col:
+                st.markdown(f"**{label}**")
+                if "error" in pred:
+                    st.info(pred["error"])
+                    continue
+                delta = pred["predicted_price"] - pred["last_close"]
+                st.metric(pred["target_date"].strftime("%m-%d(%a)"), f"{pred['predicted_price']:,.0f}원")
+                st.markdown(_change_html(delta, pred["predicted_return"] * 100, soft=True), unsafe_allow_html=True)
+                st.caption(
+                    f"{pred['best_model']} · 검증{pred['n_holdout']}일 · MAE {pred['mae']:,.0f}원 · "
+                    f"MAPE {pred['mape'] * 100:.1f}% · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
+                )
+
+        with st.expander("심층 모델 상세 (교차검증 비교 · 피처 영향도)"):
+            for pred, label in [(adv_pred["1d"], "다음 거래일 모델"), (adv_pred["5d"], "5거래일 후 모델")]:
+                if "error" in pred:
+                    continue
+                st.markdown(
+                    f"**{label}** — 선정: {pred['best_model']} · 학습 {pred['n_train']}행 / "
+                    f"홀드아웃 {pred['n_holdout']}행 · 뉴스 감성 히스토리 {pred['news_days']}일 누적"
+                )
+                cv_df = pd.DataFrame(
+                    {"모델": list(pred["cv_scores"].keys()), "교차검증 MAE(수익률)": list(pred["cv_scores"].values())}
+                )
+                st.dataframe(cv_df, hide_index=True, width="stretch")
+                st.dataframe(
+                    pred["feature_importance"].rename(columns={"label": "설명", "coef": "중요도"})[["설명", "중요도"]],
+                    hide_index=True,
+                    width="stretch",
+                )
+            st.caption(
+                "교차검증 점수는 모델을 고르는 데만 쓰였고, 위 정확도는 모델 선정에 관여하지 않은 "
+                "마지막 홀드아웃 구간 기준입니다. 중요도 값은 모델별로 계산 방식이 다릅니다"
+                "(회귀계수 / 트리 중요도 / 순열 중요도)."
+            )
+    else:
+        st.caption("클릭 시 여러 모델을 교차검증으로 비교해 보유한 전체 기간 데이터로 다시 예측합니다.")
+
+    with st.expander("모델 상세 (피처 영향도)"):
+        for pred, label in [(pred_1d, "다음 거래일 모델"), (pred_5d, "5거래일 후 모델")]:
             if "error" in pred:
                 continue
             st.markdown(
-                f"**{label}** — 선정: {pred['best_model']} · 학습 {pred['n_train']}행 / "
-                f"홀드아웃 {pred['n_holdout']}행 · 뉴스 감성 히스토리 {pred['news_days']}일 누적"
+                f"**{label}** — 학습 {pred['n_train']}행 / 검증 {pred['n_test']}행 · "
+                f"뉴스 감성 히스토리 {pred['news_days']}일 누적"
             )
-            cv_df = pd.DataFrame(
-                {
-                    "모델": list(pred["cv_scores"].keys()),
-                    "교차검증 MAE(수익률)": list(pred["cv_scores"].values()),
-                }
-            )
-            st.dataframe(cv_df, hide_index=True, width="stretch")
             st.dataframe(
-                pred["feature_importance"].rename(columns={"label": "설명", "coef": "중요도"})[
-                    ["설명", "중요도"]
-                ],
+                pred["feature_importance"].rename(columns={"label": "설명", "coef": "회귀계수"})[["설명", "회귀계수"]],
                 hide_index=True,
                 width="stretch",
             )
-        st.caption(
-            "교차검증 점수는 모델을 고르는 데만 쓰였고, 위 정확도는 모델 선정에 관여하지 않은 "
-            "마지막 홀드아웃 구간 기준입니다. 중요도 값은 모델별로 계산 방식이 다릅니다"
-            "(회귀계수 / 트리 중요도 / 순열 중요도)."
-        )
-else:
-    st.caption(
-        "기본 예측보다 느리지만 여러 모델을 교차검증으로 비교해 더 정교하게 다시 예측합니다. "
-        "클릭 시 보유한 전체 기간 데이터로 새로 학습합니다."
-    )
+        st.caption("회귀계수가 클수록(절대값 기준) 예측에 미치는 영향이 큽니다. 뉴스 감성은 히스토리가 쌓일수록 값이 유의미해집니다.")
 
-with st.expander("모델 상세 (피처 영향도)"):
-    for pred, label in [(pred_1d, "다음 거래일 모델"), (pred_5d, "5거래일 후 모델")]:
-        if "error" in pred:
-            continue
-        st.markdown(
-            f"**{label}** — 학습 {pred['n_train']}행 / 검증 {pred['n_test']}행 · "
-            f"뉴스 감성 히스토리 {pred['news_days']}일 누적"
-        )
-        st.dataframe(
-            pred["feature_importance"].rename(columns={"label": "설명", "coef": "회귀계수"})[
-                ["설명", "회귀계수"]
-            ],
-            hide_index=True,
-            width="stretch",
-        )
-    st.caption(
-        "회귀계수가 클수록(절대값 기준) 예측에 미치는 영향이 큽니다. 뉴스 감성은 히스토리가 쌓일수록 값이 유의미해집니다."
-    )
+# ==================================================================== 우측 하단: 뉴스 & 공시
+with right_col:
+    with st.container(key="news", border=True, height=_BOTTOM_ROW_HEIGHT):
+        _section_title("📰 뉴스 & 공시")
 
-# ------------------------------------------------------------------ 뉴스 & 공시
-st.divider()
-st.subheader("뉴스 & 공시")
+        # 탭 선택과 "표시개수"를 같은 줄에 — 예전엔 뉴스 탭 안에 별도 줄로 있어서 세로를 더 먹었다.
+        tabs_col, count_col = st.columns([4, 1])
+        with tabs_col:
+            news_tab, dart_tab = st.tabs(["📰 뉴스", "📋 공시 (DART)"])
+        with count_col:
+            news_n = st.selectbox(
+                "표시개수",
+                [5, 10, 15, 20],
+                index=1,
+                key="news_n",
+                label_visibility="collapsed",
+                help="뉴스 표시 개수",
+            )
 
-_SENT_COLOR = {"긍정": UP_COLOR, "중립": FLAT_COLOR, "부정": DOWN_COLOR}  # 상승=빨강, 하락=파랑
+        with news_tab:
+            news_df = _news(selected_code, news_n)
 
-news_tab, dart_tab = st.tabs(["📰 뉴스", "📋 공시 (DART)"])
+            if news_df.empty:
+                st.info("최근 뉴스를 찾지 못했습니다.")
+            else:
+                with st.container(height=260):
+                    for _, row in news_df.iterrows():
+                        with st.container(border=True):
+                            left, right = st.columns([6, 1])
+                            with left:
+                                title_safe = html.escape(row["title"])
+                                url_safe = html.escape(row["url"], quote=True)
+                                meta_safe = html.escape(f"{row['press']} · {row['date']}")
+                                summary_safe = html.escape(row["summary"])
+                                # 제목·출처/날짜를 한 줄에 두고 출처/날짜는 우측 정렬, 요약은 한 줄로 말줄임.
+                                st.markdown(
+                                    "<div style='display:flex;justify-content:space-between;"
+                                    "align-items:baseline;gap:0.6em;'>"
+                                    f"<a href='{url_safe}' target='_blank'>{title_safe}</a>"
+                                    f"<span style='font-size:0.8em;opacity:0.65;white-space:nowrap;'>{meta_safe}</span>"
+                                    "</div>"
+                                    "<div style='white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+                                    f"font-size:0.88em;opacity:0.85;' title='{summary_safe}'>{summary_safe}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                            with right:
+                                color = _SENT_COLOR[row["sentiment_label"]]
+                                st.markdown(
+                                    "<div style='text-align:center;padding-top:0.3em'>"
+                                    f"<span style='color:{color};font-weight:700;font-size:0.95em'>{row['sentiment_label']}</span><br>"
+                                    f"<span style='color:{color};font-size:0.78em'>{row['sentiment_score']:+d}</span>"
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
 
-with news_tab:
-    news_n = st.slider("표시 개수", 5, 20, 10, step=5, key="news_n")
-    news_df = _news(selected_code, news_n)
-
-    if news_df.empty:
-        st.info("최근 뉴스를 찾지 못했습니다.")
-    else:
-        st.caption(
-            "우측의 상승지표는 기사 속 긍정/부정 키워드 빈도로 매긴 것으로, 문맥은 이해하지 못하는 참고용 보조지표입니다."
-        )
-        for _, row in news_df.iterrows():
-            with st.container(border=True):
-                left, right = st.columns([6, 1])
-                with left:
-                    st.markdown(f"[{row['title']}]({row['url']})")
-                    st.caption(f"{row['press']} · {row['date']}")
-                    st.write(row["summary"])
-                with right:
-                    color = _SENT_COLOR[row["sentiment_label"]]
-                    st.markdown(
-                        "<div style='text-align:center;padding-top:0.5em'>"
-                        f"<span style='color:{color};font-weight:700;font-size:1.1em'>{row['sentiment_label']}</span><br>"
-                        f"<span style='color:{color};font-size:0.85em'>{row['sentiment_score']:+d}</span>"
-                        "</div>",
-                        unsafe_allow_html=True,
+        with dart_tab:
+            try:
+                dart_df = _dart(selected_code)
+            except dart.DartKeyMissing as e:
+                st.info(str(e))
+            else:
+                if dart_df.empty:
+                    st.info("최근 90일 내 공시가 없습니다.")
+                else:
+                    st.dataframe(
+                        dart_df.rename(columns={"rcept_dt": "접수일", "report_nm": "보고서명", "flr_nm": "제출인"}),
+                        column_config={"url": st.column_config.LinkColumn("링크", display_text="열기")},
+                        hide_index=True,
+                        height=260,
+                        width="stretch",
                     )
-
-with dart_tab:
-    try:
-        dart_df = _dart(selected_code)
-    except dart.DartKeyMissing as e:
-        st.info(str(e))
-    else:
-        if dart_df.empty:
-            st.info("최근 90일 내 공시가 없습니다.")
-        else:
-            st.dataframe(
-                dart_df.rename(columns={"rcept_dt": "접수일", "report_nm": "보고서명", "flr_nm": "제출인"}),
-                column_config={"url": st.column_config.LinkColumn("링크", display_text="열기")},
-                hide_index=True,
-                width="stretch",
-            )
