@@ -33,6 +33,8 @@ _SENT_COLOR = {"긍정": UP_COLOR, "중립": FLAT_COLOR, "부정": DOWN_COLOR}
 
 _CRYPTO_BENCHMARKS = {"비트코인": "KRW-BTC", "이더리움": "KRW-ETH", "리플": "KRW-XRP"}
 _CRYPTO_DEFAULT = ("KRW-BTC", "비트코인")
+_BAR_PERIODS = {"일봉": None, "주봉": "W", "월봉": "ME"}  # 차트 전용 — 시세 요약·예측은 항상 일봉 기준
+_CHART_TYPES = ("캔들", "라인", "하이킨아시")
 _STOCK_DEFAULT = ("005930", "삼성전자")
 
 
@@ -354,12 +356,14 @@ with right_col:
             _detail_title += f" · {selected_name}"
         _section_title(_detail_title)
 
-        search_col, period_col, idx_col = st.columns([2, 1, 2])
+        search_col, period_col, bar_col, idx_col = st.columns([2, 1, 1, 2])
         with search_col:
             placeholder = "예: KRW-BTC, 비트코인" if is_crypto else "예: 005930, 삼성전자"
             manual = st.text_input("코드/이름 검색", value="", placeholder=placeholder)
         with period_col:
             period_label = st.selectbox("조회 기간", list(DATE_RANGES.keys()), index=3)
+        with bar_col:
+            bar_label = st.selectbox("봉 주기", list(_BAR_PERIODS.keys()), index=0)
         with idx_col:
             if is_crypto:
                 idx_sel = st.multiselect("코인 비교", list(_CRYPTO_BENCHMARKS.keys()), default=[])
@@ -445,9 +449,23 @@ with right_col:
         _notes.append("상승=빨강 / 하락=파랑")
         st.caption(" · ".join(_notes))
 
-        enriched = ind.add_all(price_df)
+        # 봉 주기: 시세 요약·예측은 항상 price_df(일봉)를 쓰고, 차트만 리샘플링한다 —
+        # 업비트도 상단 현재가 티커는 실시간 그대로 두고 캔들 굵기만 바꾼다.
+        bar_rule = _BAR_PERIODS[bar_label]
+        chart_price_df = ind.resample_ohlcv(price_df, bar_rule) if bar_rule else price_df
+        if chart_price_df.empty:  # 리샘플 결과가 비면(데이터가 너무 적음) 안전하게 일봉으로 폴백
+            chart_price_df = price_df
 
-        ic = st.columns(8)
+        enriched = ind.add_all(chart_price_df)
+
+        ctype_col, log_col, _spacer = st.columns([1.4, 1, 3.6])
+        with ctype_col:
+            chart_type_label = st.selectbox("차트 유형", _CHART_TYPES, index=0)
+        with log_col:
+            st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
+            log_y = st.checkbox("로그축", value=False)
+
+        ic = st.columns(10)
         show_sma5 = ic[0].checkbox("SMA5", value=False)
         show_sma20 = ic[1].checkbox("SMA20", value=True)
         show_sma60 = ic[2].checkbox("SMA60", value=True)
@@ -456,6 +474,18 @@ with right_col:
         show_vol = ic[5].checkbox("거래량", value=True)
         show_rsi = ic[6].checkbox("RSI", value=False)
         show_macd = ic[7].checkbox("MACD", value=False)
+        show_stoch = ic[8].checkbox("스토캐스틱", value=False)
+        show_ichimoku = ic[9].checkbox("일목균형표", value=False)
+
+        if show_bb:
+            bbcol1, bbcol2 = st.columns(2)
+            bb_window = bbcol1.number_input("볼밴드 기간", min_value=5, max_value=120, value=20, step=1)
+            bb_std = bbcol2.number_input("볼밴드 표준편차", min_value=0.5, max_value=4.0, value=2.0, step=0.1)
+            enriched = enriched.drop(columns=["upper", "lower", "pct_b"], errors="ignore").join(
+                ind.bollinger(enriched["Close"], window=int(bb_window), num_std=bb_std)[
+                    ["upper", "lower", "pct_b"]
+                ]
+            )
 
         sma_windows = [
             w for w, on in [(5, show_sma5), (20, show_sma20), (60, show_sma60), (120, show_sma120)] if on
@@ -465,6 +495,14 @@ with right_col:
             if col not in enriched.columns:
                 enriched[col] = ind.sma(enriched["Close"], w)
 
+        if show_stoch:
+            enriched = enriched.join(ind.stochastic(enriched))
+        if show_ichimoku:
+            enriched = enriched.join(ind.ichimoku(enriched))
+
+        chart_source = ind.heikin_ashi(enriched) if chart_type_label == "하이킨아시" else enriched
+        chart_type = "line" if chart_type_label == "라인" else "candle"
+
         overlays = {}
         for label in idx_sel:
             ov_symbol = _CRYPTO_BENCHMARKS[label] if is_crypto else label
@@ -473,7 +511,7 @@ with right_col:
                 overlays[label] = idx_df["Close"]
 
         fig = charts.build_chart(
-            enriched,
+            chart_source,
             title=f"{selected_name} ({selected_code})",
             sma_windows=tuple(sma_windows),
             show_bollinger=show_bb,
@@ -483,6 +521,11 @@ with right_col:
             index_overlays=overlays or None,
             base_height=320,
             panel_height=85,
+            chart_type=chart_type,
+            show_rangeselector=True,
+            log_y=log_y,
+            show_stochastic=show_stoch,
+            show_ichimoku=show_ichimoku,
         )
         st.plotly_chart(fig, width="stretch")
 

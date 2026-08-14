@@ -63,6 +63,84 @@ def bollinger(s: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.DataFr
     )
 
 
+def stochastic(df: pd.DataFrame, k_window: int = 14, d_window: int = 3, smooth_k: int = 3) -> pd.DataFrame:
+    """스토캐스틱(Slow) %K/%D. df는 High/Low/Close 컬럼이 필요하다.
+
+    통상 80 이상 과매수, 20 이하 과매도로 읽는다. raw %K를 smooth_k로 한 번 평활한 값을
+    "%K"로, 그걸 다시 d_window로 평활한 값을 "%D"로 삼는 슬로우 스토캐스틱 방식이다
+    (업비트를 포함해 대부분의 차팅 툴 기본값).
+    """
+    low_min = df["Low"].rolling(k_window).min()
+    high_max = df["High"].rolling(k_window).max()
+    raw_k = (df["Close"] - low_min) / (high_max - low_min) * 100
+    k = raw_k.rolling(smooth_k).mean()
+    d = k.rolling(d_window).mean()
+    return pd.DataFrame({"stoch_k": k, "stoch_d": d})
+
+
+def ichimoku(
+    df: pd.DataFrame,
+    tenkan_window: int = 9,
+    kijun_window: int = 26,
+    senkou_b_window: int = 52,
+) -> pd.DataFrame:
+    """일목균형표(Ichimoku) — 전환선/기준선/선행스팬A·B/후행스팬. df는 High/Low/Close 필요.
+
+    선행스팬(구름)은 관례대로 kijun_window(기본 26)만큼 미래로 밀어서(shift) 그린다 —
+    지금 보이는 구름은 kijun_window일 전 데이터로 계산된 것이라는 뜻. 후행스팬은
+    반대로 과거로 밀어서(shift 음수) 그린다.
+    """
+    tenkan = (df["High"].rolling(tenkan_window).max() + df["Low"].rolling(tenkan_window).min()) / 2
+    kijun = (df["High"].rolling(kijun_window).max() + df["Low"].rolling(kijun_window).min()) / 2
+    senkou_a = ((tenkan + kijun) / 2).shift(kijun_window)
+    senkou_b = (
+        (df["High"].rolling(senkou_b_window).max() + df["Low"].rolling(senkou_b_window).min()) / 2
+    ).shift(kijun_window)
+    chikou = df["Close"].shift(-kijun_window)
+    return pd.DataFrame(
+        {
+            "ichimoku_tenkan": tenkan,
+            "ichimoku_kijun": kijun,
+            "ichimoku_senkou_a": senkou_a,
+            "ichimoku_senkou_b": senkou_b,
+            "ichimoku_chikou": chikou,
+        }
+    )
+
+
+def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    """하이킨아시 캔들로 변환한 OHLC(Volume은 그대로) DataFrame.
+
+    시가/고가/저가/종가를 전 봉과 평활해서 다시 계산하므로 노이즈가 줄고 추세가
+    더 매끈하게 보인다 — 대신 실제 체결가와는 다르다(그리기 전용 변환).
+    """
+    ha_close = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
+    close_vals = ha_close.to_numpy()
+    open_vals = np.empty(len(df))
+    open_vals[0] = (df["Open"].iloc[0] + df["Close"].iloc[0]) / 2
+    for i in range(1, len(df)):
+        open_vals[i] = (open_vals[i - 1] + close_vals[i - 1]) / 2
+    ha_open = pd.Series(open_vals, index=df.index)
+    ha_high = pd.concat([df["High"], ha_open, ha_close], axis=1).max(axis=1)
+    ha_low = pd.concat([df["Low"], ha_open, ha_close], axis=1).min(axis=1)
+
+    out = df.copy()
+    out["Open"], out["High"], out["Low"], out["Close"] = ha_open, ha_high, ha_low, ha_close
+    return out
+
+
+def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """일봉 OHLCV를 더 긴 봉(주봉/월봉 등)으로 리샘플링한다.
+
+    rule: pandas resample 규칙 문자열 — 주봉 "W", 월봉 "ME". 시가=첫값, 고가=최댓값,
+    저가=최솟값, 종가=마지막값, 거래량=합계라는 표준 OHLCV 집계 규칙을 쓴다. 원본에
+    없는(휴장 등) 구간은 만들지 않는다 — 시가가 없는(원본 데이터가 하나도 없는) 봉은
+    버린다.
+    """
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+    return df.resample(rule).agg(agg).dropna(subset=["Open"])
+
+
 # ---------------------------------------------------------------- 수익률/성과
 
 

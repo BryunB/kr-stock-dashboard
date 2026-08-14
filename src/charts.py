@@ -20,8 +20,14 @@ def _rebase(series: pd.Series, to_index: pd.DatetimeIndex, base_value: float) ->
     가격 스케일이 전혀 다른 지수(예: 코스피 3,200 vs 개별주 5만원)를
     같은 y축에 겹쳐 그리기 위한 리베이스. 절대값이 아니라 '같은 출발점에서
     상대적으로 얼마나 움직였는가'를 비교하는 용도.
+
+    reindex에 method="ffill"을 반드시 줘야 한다 — 그냥 reindex 후 .ffill()을 하면
+    to_index에 정확히 일치하는 날짜가 없는 값은 전부 NaN으로 채워진 뒤 그 NaN들끼리
+    ffill되어 아무것도 못 채운다(예: 주봉/월봉처럼 to_index가 원본 series의 날짜와
+    거의 안 겹치는 경우 전체가 NaN이 되는 버그가 있었다). method="ffill"은 원본
+    series의 인덱스에서 to_index 각 시점 "직전의 가장 가까운" 값을 찾아 채운다.
     """
-    aligned = series.reindex(to_index).ffill().bfill()
+    aligned = series.reindex(to_index, method="ffill").bfill()
     first = aligned.iloc[0] if len(aligned) else None
     if not aligned.empty and first not in (0, None) and pd.notna(first):
         aligned = aligned / first * base_value
@@ -39,16 +45,32 @@ def build_chart(
     index_overlays: dict[str, pd.Series] | None = None,
     base_height: int = 520,
     panel_height: int = 140,
+    chart_type: str = "candle",
+    show_rangeselector: bool = False,
+    log_y: bool = False,
+    show_stochastic: bool = False,
+    show_ichimoku: bool = False,
 ) -> go.Figure:
     """df: indicators.add_all()을 거친 OHLCV+지표 DataFrame (컬럼: Open/High/Low/Close/Volume/sma*/rsi14/macd/signal).
 
     index_overlays: {"KOSPI": 가격시계열, ...} — df의 시작 종가에 맞춰 리베이스해 가격 패널에 겹쳐 그린다.
+
+    chart_type: "candle"(기본) | "line". 하이킨아시는 이 함수가 모른다 — 호출부가
+    indicators.heikin_ashi()로 미리 변환한 df를 chart_type="candle"로 넘기면 된다
+    (캔들 시각화 자체는 동일하고 데이터만 다르다).
+
+    show_stochastic/show_ichimoku: df에 각각 stoch_k/stoch_d, ichimoku_tenkan 등의
+    컬럼이 미리 계산돼 있어야 한다(indicators.stochastic()/indicators.ichimoku() 참고) —
+    이 함수는 계산하지 않고 시각화만 한다(기존 SMA/RSI/MACD와 같은 원칙). 컬럼이 없으면
+    조용히 건너뛴다.
     """
     panels = ["가격"]
     if show_volume:
         panels.append("거래량")
     if show_rsi:
         panels.append("RSI(14)")
+    if show_stochastic:
+        panels.append("스토캐스틱")
     if show_macd:
         panels.append("MACD")
 
@@ -64,20 +86,27 @@ def build_chart(
         subplot_titles=panels,
     )
 
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index,
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name="가격",
-            increasing_line_color=_UP,
-            decreasing_line_color=_DOWN,
-        ),
-        row=1,
-        col=1,
-    )
+    if chart_type == "line":
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df["Close"], name="종가", line=dict(width=1.6, color=_UP)),
+            row=1,
+            col=1,
+        )
+    else:
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df["Open"],
+                high=df["High"],
+                low=df["Low"],
+                close=df["Close"],
+                name="가격",
+                increasing_line_color=_UP,
+                decreasing_line_color=_DOWN,
+            ),
+            row=1,
+            col=1,
+        )
 
     for w in sma_windows:
         col = f"sma{w}"
@@ -105,6 +134,49 @@ def build_chart(
                 line=dict(width=1, color=band_color, dash="dot"),
                 fill="tonexty",
                 fillcolor="rgba(148,163,184,0.12)",
+            ),
+            row=1,
+            col=1,
+        )
+
+    if show_ichimoku and {
+        "ichimoku_tenkan",
+        "ichimoku_kijun",
+        "ichimoku_senkou_a",
+        "ichimoku_senkou_b",
+    } <= set(df.columns):
+        fig.add_trace(
+            go.Scatter(
+                x=df.index, y=df["ichimoku_tenkan"], name="전환선", line=dict(width=1, color="#ef4444")
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df.index, y=df["ichimoku_kijun"], name="기준선", line=dict(width=1, color="#3b82f6")
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df["ichimoku_senkou_a"],
+                name="선행스팬A",
+                line=dict(width=0.6, color="rgba(16,185,129,0.6)"),
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df["ichimoku_senkou_b"],
+                name="선행스팬B",
+                line=dict(width=0.6, color="rgba(239,68,68,0.6)"),
+                fill="tonexty",
+                fillcolor="rgba(148,163,184,0.15)",
             ),
             row=1,
             col=1,
@@ -151,6 +223,21 @@ def build_chart(
         fig.add_hline(y=70, line_dash="dash", line_color="gray", line_width=0.8, row=row, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="gray", line_width=0.8, row=row, col=1)
 
+    if show_stochastic:
+        row += 1
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df["stoch_k"], name="%K", line=dict(color="#7c3aed", width=1.2)),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df["stoch_d"], name="%D", line=dict(color="#f59e0b", width=1.2)),
+            row=row,
+            col=1,
+        )
+        fig.add_hline(y=80, line_dash="dash", line_color="gray", line_width=0.8, row=row, col=1)
+        fig.add_hline(y=20, line_dash="dash", line_color="gray", line_width=0.8, row=row, col=1)
+
     if show_macd:
         row += 1
         fig.add_trace(
@@ -178,4 +265,24 @@ def build_chart(
         margin=dict(l=40, r=20, t=70, b=30),
         hovermode="x unified",
     )
+
+    if show_rangeselector:
+        fig.update_xaxes(
+            rangeselector=dict(
+                buttons=[
+                    dict(count=1, label="1개월", step="month", stepmode="backward"),
+                    dict(count=3, label="3개월", step="month", stepmode="backward"),
+                    dict(count=6, label="6개월", step="month", stepmode="backward"),
+                    dict(count=1, label="1년", step="year", stepmode="backward"),
+                    dict(step="all", label="전체"),
+                ],
+                y=1.18,
+                yanchor="top",
+            ),
+            row=1,
+            col=1,
+        )
+    if log_y:
+        fig.update_yaxes(type="log", row=1, col=1)
+
     return fig
