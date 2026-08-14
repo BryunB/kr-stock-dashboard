@@ -15,11 +15,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src import config, portfolio, screener
+from src import config, portfolio, predictor, screener
+from src import data_loader as dl
 
 PORTFOLIO_COLOR = "#0ea5e9"  # 포트폴리오 자산 라인 (하늘색)
 KOSPI_COLOR = "#f59e0b"  # 코스피 비교 라인 — charts.py의 지수 오버레이 색(amber)과 통일
 UP_COLOR, DOWN_COLOR, FLAT_COLOR = "#ef4444", "#3b82f6", "#6b7280"  # app.py와 동일한 국내 관행
+UP_SOFT, DOWN_SOFT, FLAT_SOFT = "#cc6666", "#668dcc", "#9ca3af"  # 파스텔 — 매수/매도 표시·예측값용
 
 st.title("💰 모의투자")
 
@@ -45,6 +47,113 @@ def _change_html(diff: float, pct: float) -> str:
 def _current_prices() -> dict[str, float]:
     snapshot = screener.screen(market="ALL")
     return dict(zip(snapshot["Code"], snapshot["Close"], strict=True))
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="시세 불러오는 중...")
+def _price(code: str) -> pd.DataFrame:
+    return dl.get_price(code)
+
+
+def _trades_show_df(df: pd.DataFrame) -> pd.DataFrame:
+    """trades.csv 행들을 화면 표시용 컬럼(한국어 라벨 + 거래총액)으로 변환한다."""
+    out = df.copy()
+    out["action"] = out["action"].map({"buy": "매수", "sell": "매도"})
+    return out[["date", "name", "code", "action", "quantity", "price", "amount", "reason"]].rename(
+        columns={
+            "date": "날짜",
+            "name": "종목명",
+            "code": "종목코드",
+            "action": "구분",
+            "quantity": "수량",
+            "price": "체결가",
+            "amount": "거래총액",
+            "reason": "판단 근거",
+        }
+    )
+
+
+def _color_action(val: str) -> str:
+    if val == "매수":
+        return f"color:{UP_SOFT};font-weight:600"
+    if val == "매도":
+        return f"color:{DOWN_SOFT};font-weight:600"
+    return ""
+
+
+def _bold(_val: object) -> str:
+    return "font-weight:700"
+
+
+_TRADES_COLUMN_CONFIG = {
+    "체결가": st.column_config.NumberColumn(format="%,.0f원"),
+    "거래총액": st.column_config.NumberColumn(format="%,.0f원"),
+}
+
+
+@st.dialog("종목 상세", width="large")
+def _stock_detail_dialog(code: str, name: str, all_trades: pd.DataFrame) -> None:
+    st.markdown(f"### {name} ({code})")
+    st.caption("⚠️ 참고용 통계 모델이며 투자 조언이 아닙니다.")
+
+    price_df = _price(code)
+    if price_df.empty:
+        st.info("가격 데이터를 불러오지 못했습니다.")
+    else:
+        close = float(price_df["Close"].iloc[-1])
+        prev_close = float(price_df["Close"].iloc[-2]) if len(price_df) >= 2 else None
+
+        pcol, chartcol = st.columns([1, 2])
+        with pcol:
+            st.metric("현재가", f"{close:,.0f}원")
+            if prev_close:
+                diff = close - prev_close
+                st.markdown(_change_html(diff, diff / prev_close * 100), unsafe_allow_html=True)
+        with chartcol:
+            recent = price_df.tail(120)
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(x=recent.index, y=recent["Close"], line=dict(width=1.8, color=PORTFOLIO_COLOR))
+            )
+            fig.update_layout(height=160, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+            st.plotly_chart(fig, width="stretch")
+
+        st.markdown("**예측 종가**")
+        p1, p2 = st.columns(2)
+        for col, horizon, label in [(p1, 1, "다음 거래일"), (p2, 5, "5거래일 후")]:
+            with col:
+                try:
+                    pred = predictor.train_and_predict(price_df, horizon=horizon, sentiment_hist=None)
+                except Exception as e:
+                    pred = {"error": f"예측 중 오류: {e}"}
+                if "error" in pred:
+                    st.caption(pred["error"])
+                    continue
+                pdiff = pred["predicted_price"] - pred["last_close"]
+                st.metric(label, f"{pred['predicted_price']:,.0f}원")
+                pcolor = UP_SOFT if pdiff > 0 else DOWN_SOFT if pdiff < 0 else FLAT_SOFT
+                parrow = "▲" if pdiff > 0 else "▼" if pdiff < 0 else "―"
+                st.markdown(
+                    f"<span style='color:{pcolor};font-weight:600'>{parrow} {pdiff:+,.0f}원 "
+                    f"({pred['predicted_return'] * 100:+.2f}%)</span>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"방향적중 {pred['directional_accuracy'] * 100:.0f}%")
+
+    st.divider()
+    st.markdown(f"**{name} 거래 내역**")
+    stock_trades = all_trades[all_trades["code"] == code].sort_values("date", ascending=False)
+    if stock_trades.empty:
+        st.caption("이 종목의 거래 이력이 없습니다.")
+    else:
+        st.dataframe(
+            _trades_show_df(stock_trades)
+            .style.map(_bold, subset=["종목명"])
+            .map(_color_action, subset=["구분"]),
+            column_config=_TRADES_COLUMN_CONFIG,
+            hide_index=True,
+            width="stretch",
+            height=200,
+        )
 
 
 state = portfolio.get_state()
@@ -75,6 +184,7 @@ last_run = state["last_run_date"]
 # ==================================================================== 상단 요약
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("총자산", f"{total_equity:,.0f}원")
+m1.caption(f"현금 {state['cash']:,.0f}원 + 주식평가금액 {holdings_value:,.0f}원")
 
 cum_return_pct = (total_equity / portfolio.INITIAL_CASH - 1) * 100
 m2.metric("누적 수익률 (원금 대비)", f"{cum_return_pct:+.2f}%")
@@ -142,6 +252,7 @@ st.subheader("📦 보유종목")
 if holdings_mtm.empty:
     st.caption("보유 중인 종목이 없습니다.")
 else:
+    st.caption("행을 클릭하면 해당 종목의 시세·예측·거래 이력이 팝업으로 열립니다.")
     display = holdings_mtm.copy()
     display["평가손익률"] = (display["current_price"] / display["avg_price"] - 1) * 100
     display["비중"] = display["market_value"] / total_equity * 100 if total_equity else 0.0
@@ -149,70 +260,151 @@ else:
         st.caption("⚠️ 표시에 ※가 붙은 종목은 오늘 종가 조회에 실패해 평단가로 대체 평가한 값입니다.")
     display["종목명"] = display["name"] + display["price_is_stale"].map({True: " ※", False: ""})
 
-    show = display[["종목명", "code", "quantity", "avg_price", "current_price", "평가손익률", "비중"]].rename(
-        columns={"code": "종목코드", "quantity": "수량", "avg_price": "평단가", "current_price": "현재가"}
+    show_holdings = display[
+        ["종목명", "code", "quantity", "avg_price", "current_price", "market_value", "평가손익률", "비중"]
+    ].rename(
+        columns={
+            "code": "종목코드",
+            "quantity": "수량",
+            "avg_price": "평단가",
+            "current_price": "현재가",
+            "market_value": "보유총액",
+        }
     )
-    st.dataframe(
-        show,
+    holdings_event = st.dataframe(
+        show_holdings.style.map(_bold, subset=["종목명"]),
         column_config={
             "평단가": st.column_config.NumberColumn(format="%,.0f원"),
             "현재가": st.column_config.NumberColumn(format="%,.0f원"),
+            "보유총액": st.column_config.NumberColumn(format="%,.0f원"),
             "평가손익률": st.column_config.NumberColumn(format="%+.2f%%"),
             "비중": st.column_config.NumberColumn(format="%.1f%%"),
         },
         hide_index=True,
         width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key="holdings_table",
     )
+    holdings_selected = holdings_event.selection.rows if hasattr(holdings_event, "selection") else []
+    if holdings_selected:
+        sel_holding = display.iloc[holdings_selected[0]]
+        _stock_detail_dialog(sel_holding["code"], sel_holding["name"], trades)
 
 st.divider()
 
 # ==================================================================== 거래 내역
 st.subheader("📜 거래 내역")
-st.caption("체결가는 그날(장 마감 후 확정된) 종가 기준으로 가정한 시뮬레이션 값입니다.")
+st.caption(
+    "체결가는 그날(장 마감 후 확정된) 종가 기준으로 가정한 시뮬레이션 값입니다. "
+    "행을 클릭하면 해당 종목의 시세·예측·거래 이력이 팝업으로 열립니다."
+)
 if trades.empty:
     st.caption("거래 이력이 없습니다.")
 else:
-    recent_trades = trades.sort_values("date", ascending=False).head(50).copy()
-    recent_trades["action"] = recent_trades["action"].map({"buy": "매수", "sell": "매도"})
-    show_trades = recent_trades[["date", "name", "code", "action", "quantity", "price", "reason"]].rename(
-        columns={
-            "date": "날짜",
-            "name": "종목명",
-            "code": "종목코드",
-            "action": "구분",
-            "quantity": "수량",
-            "price": "체결가",
-            "reason": "판단 근거",
-        }
-    )
-    st.dataframe(
-        show_trades,
-        column_config={"체결가": st.column_config.NumberColumn(format="%,.0f원")},
-        hide_index=True,
-        width="stretch",
-    )
+    trades_all = trades.copy()
+    trades_all["date"] = pd.to_datetime(trades_all["date"])
+
+    fcol1, fcol2 = st.columns([1, 1])
+    with fcol1:
+        min_d, max_d = trades_all["date"].min().date(), trades_all["date"].max().date()
+        date_range = st.date_input("기간", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+    with fcol2:
+        query = st.text_input("종목명 또는 종목코드 검색", placeholder="예: 삼성전자 또는 005930")
+
+    filtered = trades_all
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start, end = date_range
+        filtered = filtered[(filtered["date"].dt.date >= start) & (filtered["date"].dt.date <= end)]
+    elif isinstance(date_range, tuple) and len(date_range) == 1:
+        filtered = filtered[filtered["date"].dt.date == date_range[0]]
+    if query.strip():
+        q = query.strip()
+        filtered = filtered[
+            filtered["name"].str.contains(q, case=False, na=False)
+            | filtered["code"].str.contains(q, case=False, na=False)
+        ]
+
+    filtered = filtered.sort_values("date", ascending=False).reset_index(drop=True)
+    filtered["date"] = filtered["date"].dt.strftime("%Y-%m-%d")
+
+    if filtered.empty:
+        st.caption("조건에 맞는 거래 내역이 없습니다.")
+    else:
+        event = st.dataframe(
+            _trades_show_df(filtered)
+            .style.map(_bold, subset=["종목명"])
+            .map(_color_action, subset=["구분"]),
+            column_config=_TRADES_COLUMN_CONFIG,
+            hide_index=True,
+            width="stretch",
+            height=360,  # 계속 쌓일 이력 대비 고정 높이 — 넘치면 표 안에서 스크롤
+            on_select="rerun",
+            selection_mode="single-row",
+            key="trades_table",
+        )
+        selected_rows = event.selection.rows if hasattr(event, "selection") else []
+        if selected_rows:
+            sel = filtered.iloc[selected_rows[0]]
+            _stock_detail_dialog(sel["code"], sel["name"], trades)
     st.caption("판단 근거는 정해진 규칙(임계값)에 따른 자동 판단 서술일 뿐, 종목 추천이 아닙니다.")
 
 st.divider()
 
-# ==================================================================== 오늘의 판단 요약
-st.subheader("🗒️ 오늘의 판단 요약")
-if last_run is None or trades.empty:
-    st.caption("아직 매매 이력이 없습니다.")
+# ==================================================================== 거래 요약
+st.subheader("🧾 거래 요약")
+if trades.empty or equity_hist.empty:
+    st.caption("아직 거래 이력이 없습니다.")
 else:
-    today_trades = trades[trades["date"] == last_run]
-    n_buy = (today_trades["action"] == "buy").sum()
-    n_sell = (today_trades["action"] == "sell").sum()
+    daily_counts = (
+        trades.groupby("date")["action"]
+        .value_counts()
+        .unstack(fill_value=0)
+        .reindex(columns=["buy", "sell"], fill_value=0)
+        .rename(columns={"buy": "매수", "sell": "매도"})
+        .reset_index()
+    )
 
-    if len(equity_hist) >= 2:
-        prev_equity = equity_hist["total_equity"].iloc[-2]
-        diff = total_equity - prev_equity
-        pct = diff / prev_equity * 100 if prev_equity else 0.0
-        change_html = _change_html(diff, pct)
-    else:
-        change_html = ""
+    eq = equity_hist[["date", "cash", "holdings_value", "total_equity"]].copy()
+    eq["전일대비"] = eq["total_equity"].diff()
+    eq["전일대비율"] = eq["total_equity"].pct_change() * 100
+    eq["시작대비"] = (eq["total_equity"] / portfolio.INITIAL_CASH - 1) * 100
 
-    st.markdown(
-        f"**{last_run}** 기준 매수 {n_buy}건, 매도 {n_sell}건. 총자산 {total_equity:,.0f}원 {change_html}",
-        unsafe_allow_html=True,
+    daily_summary = eq.merge(daily_counts, on="date", how="left")
+    daily_summary["매수"] = daily_summary["매수"].fillna(0).astype(int)
+    daily_summary["매도"] = daily_summary["매도"].fillna(0).astype(int)
+    daily_summary = daily_summary.sort_values("date", ascending=False).rename(
+        columns={
+            "date": "날짜",
+            "cash": "현금잔고",
+            "holdings_value": "주식평가금액",
+            "total_equity": "총자산",
+        }
+    )
+
+    def _color_diff(val: float) -> str:
+        if pd.isna(val) or val == 0:
+            return ""
+        return f"color:{UP_COLOR};font-weight:600" if val > 0 else f"color:{DOWN_COLOR};font-weight:600"
+
+    show_summary = daily_summary[
+        ["날짜", "총자산", "매수", "매도", "전일대비", "전일대비율", "시작대비", "현금잔고", "주식평가금액"]
+    ]
+    st.dataframe(
+        show_summary.style.map(_color_diff, subset=["전일대비", "전일대비율", "시작대비"]),
+        column_config={
+            "총자산": st.column_config.NumberColumn(format="%,.0f원"),
+            "전일대비": st.column_config.NumberColumn(format="%+,.0f원"),
+            "전일대비율": st.column_config.NumberColumn(format="%+.2f%%"),
+            "시작대비": st.column_config.NumberColumn(format="%+.2f%%"),
+            "현금잔고": st.column_config.NumberColumn(format="%,.0f원"),
+            "주식평가금액": st.column_config.NumberColumn(format="%,.0f원"),
+        },
+        hide_index=True,
+        width="stretch",
+        height=280,
+    )
+    st.caption(
+        "전일대비는 직전 거래일 대비, 시작대비는 시작 원금(1억원) 대비 총자산 변동입니다. "
+        "매매가 0건인 날에도 보유종목 평가금액이 바뀌면 총자산이 변동될 수 있습니다."
     )
