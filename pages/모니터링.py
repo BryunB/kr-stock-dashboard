@@ -7,9 +7,12 @@ app.py는 지금 지인에게 공유 중인 배포라 한 글자도 수정하지
 
 indicators.py/charts.py/predictor.py는 OHLCV 컬럼 계약만 맞으면 시장과 무관하게 그대로
 동작하는 걸 이미 실측 확인했다 — 그래서 이 세 모듈은 분기가 없다. 분기가 필요한 곳은
-유니버스 조회(screener vs crypto_screener), 종목 검색(data_loader vs crypto_loader),
-뉴스(news vs crypto_news — 종목코드 대신 코인명 키워드), 공시(DART는 코인에 없어 탭 자체를
-숨긴다), 그리고 코인은 시가총액·주간등락률 데이터가 없어 해당 탭/옵션을 뺀다.
+유니버스 조회(screener vs crypto_screener vs us_screener), 종목 검색(data_loader vs
+crypto_loader — 해외증시는 data_loader.find_symbol(market="NASDAQ")로 그대로 재사용),
+뉴스(news vs crypto_news — 코인·해외증시 둘 다 종목코드 기반 뉴스가 없어 종목명/코인명
+키워드 검색으로 crypto_news를 공유 재사용한다), 공시(DART는 코인·해외증시 둘 다 없어 탭
+자체를 숨긴다), 그리고 코인·해외증시는 주간 등락률 데이터가 없어 해당 탭/옵션을 뺀다
+(해외증시는 나스닥 스크리너 API가 시가총액은 주므로 그 탭은 코인과 달리 유지한다).
 """
 
 from __future__ import annotations
@@ -20,7 +23,18 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src import charts, config, crypto_loader, crypto_news, crypto_screener, dart, news, predictor, screener
+from src import (
+    charts,
+    config,
+    crypto_loader,
+    crypto_news,
+    crypto_screener,
+    dart,
+    news,
+    predictor,
+    screener,
+    us_screener,
+)
 from src import data_loader as dl
 from src import indicators as ind
 
@@ -49,16 +63,32 @@ _CRYPTO_MINUTE_PERIODS = {
 }
 _MINUTE_CANDLE_COUNT = 300  # 최근 N개만 (업비트 요청 상한 200개/회 대비 최대 2회 페이지네이션)
 _STOCK_DEFAULT = ("005930", "삼성전자")
+_US_DEFAULT = ("AAPL", "Apple Inc")
+# config.INDICES 키 중 미국 비교에 적합한 항목만 (KOSPI/KOSDAQ류 제외)
+_US_BENCHMARKS = ("NASDAQ", "S&P500", "DOW", "NIKKEI225", "VIX")
 
 
-def _change_html(diff: float, pct: float, *, soft: bool = False) -> str:
+def _change_html(diff: float, pct: float, *, soft: bool = False, unit: str = "원", decimals: int = 0) -> str:
     up, down, flat = (UP_SOFT, DOWN_SOFT, FLAT_SOFT) if soft else (UP_COLOR, DOWN_COLOR, FLAT_COLOR)
     color = up if diff > 0 else down if diff < 0 else flat
     arrow = "▲" if diff > 0 else "▼" if diff < 0 else "―"
+    diff_str = f"${diff:+,.{decimals}f}" if unit == "$" else f"{diff:+,.{decimals}f}{unit}"
     return (
         f"<span style='color:{color};font-weight:600;font-size:0.95rem'>"
-        f"{arrow} {diff:+,.0f}원 ({pct:+.2f}%)</span>"
+        f"{arrow} {diff_str} ({pct:+.2f}%)</span>"
     )
+
+
+def _money(v: float, *, unit: str = "원") -> str:
+    """가격 한 값을 통화 단위에 맞게 포맷한다. 해외증시는 '$' 접두사 + 소수 2자리(센트 단위),
+    국내/코인은 기존과 동일하게 '원' 접미사 + 정수."""
+    return f"${v:,.2f}" if unit == "$" else f"{v:,.0f}원"
+
+
+def _big_money(v: float, *, unit: str = "원") -> str:
+    """시가총액/거래대금처럼 큰 금액을 스케일링해서 포맷한다. 해외증시는 10억달러(B) 단위,
+    국내/코인은 기존과 동일하게 억원 단위."""
+    return f"${v / 1e9:,.2f}B" if unit == "$" else f"{v / 1e8:,.0f}억원"
 
 
 def _section_title(text: str) -> None:
@@ -87,6 +117,11 @@ def _screen(market: str, days_back: int, min_marcap: float, min_volume: float) -
 @st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="코인 시세 불러오는 중...")
 def _crypto_screen() -> pd.DataFrame:
     return crypto_screener.screen()
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="해외증시 시세 불러오는 중...")
+def _us_screen() -> pd.DataFrame:
+    return us_screener.screen()
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="가격 데이터 불러오는 중...")
@@ -155,12 +190,19 @@ st.markdown("##### 🖥️ 모니터링")
 # ==================================================================== 맨 위: 시장 선택
 top_left, _top_rest = st.columns([2, 8])
 with top_left:
-    market_type = st.radio("시장 구분", ["국내증시", "코인"], horizontal=True, key="market_type")
+    market_type = st.radio("시장 구분", ["국내증시", "해외증시", "코인"], horizontal=True, key="market_type")
 is_crypto = market_type == "코인"
+is_us = market_type == "해외증시"
 if is_crypto:
     st.caption(
         "⚠️ 코인 시세는 업비트 공개 API, 뉴스는 네이버 뉴스 키워드 검색 기반입니다. "
         "주간 등락률·시가총액은 데이터 소스 한계로 제공하지 않습니다."
+    )
+elif is_us:
+    st.caption(
+        "⚠️ 해외증시(나스닥) 시세는 나스닥 공개 스크리너 API 기준 당일 스냅샷이고, 뉴스는 "
+        "네이버 뉴스 키워드 검색 기반입니다. 주간 등락률은 데이터 소스 한계로 제공하지 않고, "
+        "거래대금은 거래량×종가 근사치입니다."
     )
 
 left_col, right_col = st.columns([3, 7], gap="medium")
@@ -178,7 +220,7 @@ _CRYPTO_TABLE_HEIGHT = 520
 
 # ==================================================================== 좌측 상단: 스크리닝
 with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
-    _section_title("🪙 코인 요약" if is_crypto else "📊 주가 요약")
+    _section_title("🌎 해외증시 요약" if is_us else "🪙 코인 요약" if is_crypto else "📊 주가 요약")
 
     if is_crypto:
         top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
@@ -239,6 +281,78 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
                     "tbl_amount",
                     ranked_amount,
                     _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "%,.0f억원", scale=1e8),
+                )
+            )
+    elif is_us:
+        top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
+        if st.button("🔄", help="새로고침 (캐시 초기화)"):
+            st.cache_data.clear()
+            st.rerun()
+
+        try:
+            universe = _us_screen()
+        except Exception as e:
+            st.error(f"해외증시 시세를 불러오지 못했습니다: {e}")
+            st.stop()
+
+        market_label = "NASDAQ"
+
+        def _render_table(ranked, key, value_col, value_label, fmt, scale=1.0):
+            display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
+            display[value_label] = ranked[value_col] / scale
+            col_config = {
+                "종가": st.column_config.NumberColumn(format="$%,.2f"),
+                value_label: st.column_config.NumberColumn(format=fmt),
+            }
+            return st.dataframe(
+                display[["종목명", "종가", value_label]],
+                width="stretch",
+                hide_index=True,
+                height=min(30 * (len(display) + 1), _STOCK_TABLE_HEIGHT),
+                column_config=col_config,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=key,
+            )
+
+        rise_tab, amount_tab, marcap_tab = st.tabs(["📈 등락률", "💰 거래대금", "🏢 시가총액"])
+        picks = []
+
+        with rise_tab:
+            direction = st.radio("방향", ["상승", "하락"], horizontal=True)
+            ranked_rise = screener.top_movers(
+                universe, by="DailyChangeRatio", n=top_n, ascending=(direction == "하락")
+            )
+            st.caption(
+                f"{market_label} {len(universe):,}종목 중 당일 {direction}률 상위 {len(ranked_rise)}개"
+            )
+            picks.append(
+                (
+                    "tbl_rise",
+                    ranked_rise,
+                    _render_table(ranked_rise, "tbl_rise", "DailyChangeRatio", "등락%", "%.2f%%"),
+                )
+            )
+
+        with amount_tab:
+            ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
+            st.caption(f"{market_label} {len(universe):,}종목 중 거래대금(근사) 상위 {len(ranked_amount)}개")
+            picks.append(
+                (
+                    "tbl_amount",
+                    ranked_amount,
+                    _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "$%,.2fB", scale=1e9),
+                )
+            )
+
+        with marcap_tab:
+            ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
+            st.caption(f"{market_label} {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
+            picks.append(
+                (
+                    "tbl_marcap",
+                    ranked_marcap,
+                    _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액", "$%,.2fB", scale=1e9),
                 )
             )
     else:
@@ -351,8 +465,12 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
             )
 
     # 시장 전환 시 이전 선택이 다른 시장 코드로 남아있으면 안 되므로, 선택 상태를 시장별로 분리해 둔다.
-    _sel_code_key = "selected_code_crypto" if is_crypto else "selected_code_stock"
-    _sel_name_key = "selected_name_crypto" if is_crypto else "selected_name_stock"
+    _sel_code_key = (
+        "selected_code_crypto" if is_crypto else "selected_code_us" if is_us else "selected_code_stock"
+    )
+    _sel_name_key = (
+        "selected_name_crypto" if is_crypto else "selected_name_us" if is_us else "selected_name_stock"
+    )
 
     for tbl_key, ranked_df, event in picks:
         if not event.selection.rows:
@@ -369,14 +487,19 @@ with right_col:
         selected_code = st.session_state.get(_sel_code_key)
         selected_name = st.session_state.get(_sel_name_key, "")
 
-        _detail_title = "🪙 코인 상세" if is_crypto else "📈 종목 상세"
+        _detail_title = "🌎 해외증시 상세" if is_us else "🪙 코인 상세" if is_crypto else "📈 종목 상세"
         if selected_code:
             _detail_title += f" · {selected_name}"
         _section_title(_detail_title)
 
         search_col, period_col, bar_col, idx_col = st.columns([2, 1, 1, 2])
         with search_col:
-            placeholder = "예: KRW-BTC, 비트코인" if is_crypto else "예: 005930, 삼성전자"
+            if is_crypto:
+                placeholder = "예: KRW-BTC, 비트코인"
+            elif is_us:
+                placeholder = "예: AAPL, 애플"
+            else:
+                placeholder = "예: 005930, 삼성전자"
             manual = st.text_input("코드/이름 검색", value="", placeholder=placeholder)
         with period_col:
             period_label = st.selectbox("조회 기간", list(DATE_RANGES.keys()), index=3)
@@ -390,11 +513,18 @@ with right_col:
         with idx_col:
             if is_crypto:
                 idx_sel = st.multiselect("코인 비교", list(_CRYPTO_BENCHMARKS.keys()), default=[])
+            elif is_us:
+                idx_sel = st.multiselect("지수 비교", list(_US_BENCHMARKS), default=["NASDAQ", "S&P500"])
             else:
                 idx_sel = st.multiselect("지수 비교", list(config.INDICES.keys()), default=["KOSPI"])
 
         if manual.strip():
-            hits = crypto_loader.find_symbol(manual.strip()) if is_crypto else dl.find_symbol(manual.strip())
+            if is_crypto:
+                hits = crypto_loader.find_symbol(manual.strip())
+            elif is_us:
+                hits = dl.find_symbol(manual.strip(), market="NASDAQ")
+            else:
+                hits = dl.find_symbol(manual.strip())
             code_col = "Code" if "Code" in hits.columns else "Symbol"
             if not hits.empty:
                 options = {
@@ -407,7 +537,12 @@ with right_col:
                 st.warning("검색 결과가 없습니다.")
 
         if not selected_code:
-            selected_code, selected_name = _CRYPTO_DEFAULT if is_crypto else _STOCK_DEFAULT
+            if is_crypto:
+                selected_code, selected_name = _CRYPTO_DEFAULT
+            elif is_us:
+                selected_code, selected_name = _US_DEFAULT
+            else:
+                selected_code, selected_name = _STOCK_DEFAULT
 
         # 예전엔 이 이름(코드)를 차트 자체의 Plotly title로 그렸는데, 매물대/레인지셀렉터가
         # 추가되면서 위쪽 공간이 빡빡해져 차트 상단(캔들/레인지셀렉터 버튼)과 겹쳐 보였다 —
@@ -452,24 +587,31 @@ with right_col:
         _vol_unit = selected_code.replace("KRW-", "") if is_crypto else "주"
         _vol_fmt = f"{float(_last['Volume']):,.4f}" if is_crypto else f"{float(_last['Volume']):,.0f}"
 
+        _unit = "$" if is_us else "원"
+
         _r1 = st.columns(8)
-        _r1[0].metric("현재가", f"{_close:,.0f}원")
+        _r1[0].metric("현재가", _money(_close, unit=_unit))
         if _prev_close:
             _diff = _close - _prev_close
-            _r1[0].markdown(_change_html(_diff, _diff / _prev_close * 100), unsafe_allow_html=True)
-        _r1[1].metric("시가", f"{float(_last['Open']):,.0f}원")
-        _r1[2].metric("고가", f"{float(_last['High']):,.0f}원")
-        _r1[3].metric("저가", f"{float(_last['Low']):,.0f}원")
-        _r1[4].metric("전일종가", f"{_prev_close:,.0f}원" if _prev_close else "—")
-        _r1[5].metric("변동폭", f"{float(_last['High']) - float(_last['Low']):,.0f}원")
+            _r1[0].markdown(
+                _change_html(_diff, _diff / _prev_close * 100, unit=_unit, decimals=2 if is_us else 0),
+                unsafe_allow_html=True,
+            )
+        _r1[1].metric("시가", _money(float(_last["Open"]), unit=_unit))
+        _r1[2].metric("고가", _money(float(_last["High"]), unit=_unit))
+        _r1[3].metric("저가", _money(float(_last["Low"]), unit=_unit))
+        _r1[4].metric("전일종가", _money(_prev_close, unit=_unit) if _prev_close else "—")
+        _r1[5].metric("변동폭", _money(float(_last["High"]) - float(_last["Low"]), unit=_unit))
         _r1[6].metric("거래량", f"{_vol_fmt}{_vol_unit}")
-        _r1[7].metric("거래대금" if not is_crypto else "24H 거래대금", f"{_amount / 1e8:,.0f}억원")
+        _r1[7].metric("거래대금" if not is_crypto else "24H 거래대금", _big_money(_amount, unit=_unit))
 
         _notes = [f"{_last_date:%Y-%m-%d (%a)} 기준"]
         if _marcap:
-            _notes.append(f"시총 {_marcap / 1e8:,.0f}억원")
+            _notes.append(f"시총 {_big_money(_marcap, unit=_unit)}")
         if is_crypto:
             _notes.append("거래대금은 최근 24시간 누적(업비트 기준)")
+        elif is_us:
+            _notes.append("거래대금은 거래량×종가 근사치(나스닥 스크리너 API 기준)")
         elif _amount_approx:
             _notes.append("거래대금 추정치")
         elif _amount_stale:
@@ -608,7 +750,8 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
     )
 
     try:
-        if is_crypto:
+        if is_crypto or is_us:
+            # 코인·해외증시 둘 다 종목코드 기반 뉴스 소스가 없어 종목명 키워드 검색(crypto_news)을 공유 재사용한다.
             news.log_sentiment_from_news(selected_code, _crypto_news(selected_name, 10))
         else:
             news.log_sentiment_from_news(selected_code, _news(selected_code, 10))
@@ -659,7 +802,10 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
         else:
             pred_col, info_col = st.columns([1, 1])
             with pred_col:
-                st.metric(pred["target_date"].strftime("%m-%d(%a)"), f"{pred['predicted_price']:,.0f}원")
+                st.metric(
+                    pred["target_date"].strftime("%m-%d(%a)"),
+                    _money(pred["predicted_price"], unit="$" if is_us else "원"),
+                )
             with info_col:
                 st.markdown("<div style='height:0.35em'></div>", unsafe_allow_html=True)
                 st.markdown(
@@ -667,11 +813,14 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
                         pred["predicted_price"] - pred["last_close"],
                         pred["predicted_return"] * 100,
                         soft=True,
+                        unit="$" if is_us else "원",
+                        decimals=2 if is_us else 0,
                     ),
                     unsafe_allow_html=True,
                 )
                 st.caption(
-                    f"{pred['best_model']} · 검증{pred['n_holdout']}일 · MAE {pred['mae']:,.0f}원 · "
+                    f"{pred['best_model']} · 검증{pred['n_holdout']}일 · "
+                    f"MAE {_money(pred['mae'], unit='$' if is_us else '원')} · "
                     f"MAPE {pred['mape'] * 100:.1f}% · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
                 )
 
@@ -737,11 +886,11 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
 # ==================================================================== 우측 하단: 뉴스 & 공시
 with right_col:
     with st.container(key="news", border=True, height=_BOTTOM_ROW_HEIGHT):
-        _section_title("📰 뉴스" if is_crypto else "📰 뉴스 & 공시")
+        _section_title("📰 뉴스" if (is_crypto or is_us) else "📰 뉴스 & 공시")
 
         tabs_col, count_col = st.columns([4, 1])
         with tabs_col:
-            tab_labels = ["📰 뉴스"] if is_crypto else ["📰 뉴스", "📋 공시 (DART)"]
+            tab_labels = ["📰 뉴스"] if (is_crypto or is_us) else ["📰 뉴스", "📋 공시 (DART)"]
             tabs = st.tabs(tab_labels)
             news_tab = tabs[0]
             dart_tab = tabs[1] if len(tabs) > 1 else None
@@ -756,7 +905,9 @@ with right_col:
             )
 
         with news_tab:
-            news_df = _crypto_news(selected_name, news_n) if is_crypto else _news(selected_code, news_n)
+            news_df = (
+                _crypto_news(selected_name, news_n) if (is_crypto or is_us) else _news(selected_code, news_n)
+            )
 
             if news_df.empty:
                 st.info("최근 뉴스를 찾지 못했습니다.")

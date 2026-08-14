@@ -30,9 +30,12 @@ src/
   crypto_loader.py    data_loader.py의 코인 버전 (업비트 공개 API, OHLCV 컬럼 계약 동일)
   crypto_screener.py  screener.py의 코인 버전 (업비트 KRW 마켓 벌크 스크리닝)
   crypto_news.py       코인 뉴스(네이버 뉴스 키워드 검색) — 본문 조회 이후는 news.py 재사용
+  us_screener.py       screener.py의 해외증시(나스닥) 버전 — 나스닥 공개 스크리너 API 벌크 스크리닝.
+                        개별 종목 히스토리/검색은 새 모듈 없이 data_loader.py를 그대로 재사용한다
+                        (FDR가 이미 미국 티커를 지원 — market="NASDAQ"만 넘기면 됨)
   plotting.py     matplotlib 한글 폰트 설정 (노트북 전용)
 app.py            기존 스크리닝 대시보드 단독 배포 진입점 — 더는 손대지 않는다(아래 참고)
-pages/모니터링.py  app.py의 확장판 — 좌상단에서 국내증시/코인 전환 (demo_app.py 전용)
+pages/모니터링.py  app.py의 확장판 — 좌상단에서 국내증시/해외증시/코인 전환 (demo_app.py 전용)
 demo_app.py       pages/모니터링.py + pages/모의투자.py를 묶은 데모 진입점 (st.navigation)
 notebooks/        탐색용. src를 import해서 재사용 (%autoreload 사용)
 tests/            pytest
@@ -64,6 +67,7 @@ tests/            pytest
 - **코인 뉴스는 종목코드 기반 소스가 없다.** 네이버 금융처럼 코인 코드로 뉴스 목록을 주는 곳이 없어서(`m.stock.naver.com/crypto`는 API가 JS 번들에 숨은 SPA라 스크래핑 불가), `crypto_news.py`는 `search.naver.com` **키워드 검색**(코인 한글명)으로 우회한다. 검색 결과 카드에서 "네이버뉴스" 배지 링크를 기준으로 같은 카드 안의 원문 언론사 링크를 헤드라인으로 추출하는 구조적 휴리스틱을 쓴다(클래스명이 아니라 구조에 의존 — 이 페이지의 컴포넌트 클래스명은 `finance.naver.com`보다 훨씬 자주 바뀌는 것으로 보인다). 짧고 모호한 코인명은 검색 결과가 0건일 수 있다(실측: "리플" 0건, "리플 코인" 5건) — 호출부가 빈 결과를 정상 처리해야 한다. 기사 본문 조회·요약·감성 판정·감성 히스토리 기록은 원문이 결국 `n.news.naver.com`이라 `news.py` 함수를 그대로 재사용한다(중복 구현 없음).
 - **업비트 캔들 API의 페이지네이션 커서(`to` 파라미터)는 반드시 `candle_date_time_utc`를 써야 한다 — `candle_date_time_kst`를 넘기면 업비트가 그걸 UTC로 해석해 9시간 어긋난, 사실상 "최신 데이터 근처"만 반복 조회하게 된다.** 일봉은 KST 라벨이 항상 정확히 `09:00:00`(=같은 날 `00:00 UTC`)이라 날짜 경계를 안 넘어서 이 버그가 겉으로 드러나지 않았다 — 분봉/시간봉(`get_minute_price()`)을 붙이면서 실측으로 발견했다. `crypto_loader.py`의 `get_price()`/`get_minute_price()` 둘 다 UTC 커서를 쓰도록 고정돼 있고, 회귀 테스트(`test_crypto_loader.py`)가 KST와 다른 UTC 값을 픽스처에 넣어 틀린 필드를 쓰면 바로 실패하게 만들어져 있다.
 - **Plotly `make_subplots`에서 `specs`로 `colspan`을 쓰면 `shared_xaxes=True`가 조용히 무력화된다** — 각 행 x축의 `matches` 속성이 전부 `None`으로 남아 크로스헤어/줌이 행마다 따로 논다(직접 `fig.layout.xaxisN.matches`를 찍어봐야 드러나는 문제라 겉보기엔 정상처럼 보인다). `charts.py`의 매물대(Volume Profile) 2열 레이아웃에서 실측으로 발견했다 — `colspan`을 쓰는 모든 행에 대해 `fig.update_xaxes(matches="x", row=r, col=1)`을 수동으로 걸어야 한다. 같은 행 다른 열(가격 패널↔매물대)의 y축 연동은 `shared_yaxes=True`만으로 정상 동작했다(이건 버그 아님).
+- **해외증시(나스닥) 스크리닝은 나스닥 자체 공개 API**(`api.nasdaq.com/api/screener/stocks?tableonly=true&exchange=NASDAQ&download=true&limit=10000`)**를 쓴다.** 로그인 불필요, `User-Agent` 헤더만 있으면 되고, `exchange=NASDAQ` 한 번의 요청으로 전종목(실측 4,118개)을 심볼/현재가/등락률/거래량/시가총액/섹터/업종까지 통째로 준다 — KRX 스냅샷·업비트 ticker와 동일하게 "요청 수가 종목 수와 무관하게 고정"된다. `download=true`가 없으면 응답 구조가 `data.table.rows`로 바뀌고 `volume`/`sector`/`industry` 필드가 아예 빠지니 반드시 붙여야 한다. **오늘자 스냅샷만 주고 N일 전 히스토리가 없어** `WeeklyChangeRatio`는 코인과 동일한 이유로 항상 NaN이다. 거래대금(Amount) 필드가 없어 `Volume × Close`로 근사한다. `marketCap`이 `"0.00"`으로 오는 종목(실측 588/4,118건, 대부분 스팩·워런트·라이츠)은 NaN 처리한다 — 진짜 시가총액 0인 종목은 없으므로 0이 "데이터 없음" 신호다. 반면 **개별 종목의 히스토리 조회(차트·예측용)는 이미 설치된 FinanceDataReader가 그대로 지원**한다 — `fdr.DataReader("AAPL")`이 1999년부터 나오는 걸 실측 확인했고, `data_loader.get_price()`/`find_symbol(market="NASDAQ")`는 이미 시장 파라미터를 받는 범용 함수라 새 코드 없이 그대로 재사용된다. 지금은 NASDAQ만 지원 — NYSE/유럽/중국은 `exchange` 파라미터를 바꾸면 되는 구조지만 아직 미구현.
 - **차트에 그리기 도구(추세선 등)를 붙일 때 `streamlit-lightweight-charts` 같은 별도 컴포넌트를 새로 들이지 않는다.** 실제로 스모크 테스트해본 결과 이 패키지는 TradingView의 **무료** Lightweight Charts JS를 감싼 래퍼라 캔들/라인 등 시리즈 렌더링 API만 있고 그리기 도구 자체가 없다(그리기 도구는 TradingView의 유료 Advanced Charts 제품 전용 기능). 대신 Plotly(이미 프로젝트에 있음, 신규 의존성 없음)가 `dragmode="drawline"/"drawrect"/"drawcircle"/"drawopenpath"` + `modebar_add=["eraseshape", ...]`로 추세선/사각형/원/자유선 그리기와 지우개를 네이티브로 지원한다(`charts.build_chart(..., drawing_tools=True)`). 단, 피보나치 되돌림처럼 비율을 자동 계산해주는 도구는 Plotly에 없다(직선/도형만 가능). 그린 도형은 브라우저 세션에만 남고 Streamlit이 다른 위젯으로 스크립트를 재실행하면 사라진다(relayout 이벤트를 Python으로 되돌려 받으려면 추가 의존성이 필요 — 지금은 안 함).
 
 ## 가격 예측(ML) 기능 작성 규칙
