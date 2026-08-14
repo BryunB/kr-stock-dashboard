@@ -27,15 +27,20 @@ src/
   sentiment.py    키워드 기반 감성 판정 (POSITIVE_WORDS/NEGATIVE_WORDS 매칭)
   dart.py         DART 전자공시 OpenAPI 연동 (API 키 필요, 없으면 DartKeyMissing)
   predictor.py    가격 예측 (릿지 회귀, 종목별 즉석 학습 + 홀드아웃 검증) — 투자 조언 아님
+  crypto_loader.py    data_loader.py의 코인 버전 (업비트 공개 API, OHLCV 컬럼 계약 동일)
+  crypto_screener.py  screener.py의 코인 버전 (업비트 KRW 마켓 벌크 스크리닝)
+  crypto_news.py       코인 뉴스(네이버 뉴스 키워드 검색) — 본문 조회 이후는 news.py 재사용
   plotting.py     matplotlib 한글 폰트 설정 (노트북 전용)
-app.py            Streamlit 대시보드 진입점
+app.py            기존 스크리닝 대시보드 단독 배포 진입점 — 더는 손대지 않는다(아래 참고)
+pages/모니터링.py  app.py의 확장판 — 좌상단에서 국내증시/코인 전환 (demo_app.py 전용)
+demo_app.py       pages/모니터링.py + pages/모의투자.py를 묶은 데모 진입점 (st.navigation)
 notebooks/        탐색용. src를 import해서 재사용 (%autoreload 사용)
 tests/            pytest
 ```
 
-**규칙**: UI 코드(`app.py`)에서 `FinanceDataReader`나 외부 URL을 직접 호출하지 않는다. 항상 `src/data_loader.py` 또는 `src/screener.py`를 거친다. 데이터 로직과 화면 로직을 분리해야 나중에 노트북·다른 대시보드에서도 재사용 가능하다.
+**규칙**: UI 코드에서 `FinanceDataReader`나 외부 URL을 직접 호출하지 않는다. 항상 `src/data_loader.py`/`src/screener.py`(주식) 또는 `src/crypto_loader.py`/`src/crypto_screener.py`(코인)를 거친다. 데이터 로직과 화면 로직을 분리해야 나중에 노트북·다른 대시보드에서도 재사용 가능하다.
 
-`app.py`가 계속 커지면(스크리닝 외 다른 화면이 추가되면) 한 파일에 다 넣지 말고 `pages/` 디렉토리 기반 멀티페이지 구조로 전환을 고려한다.
+**`app.py`는 더 이상 손대지 않는다.** 지인에게 공유 중인 배포라 계속 그대로 둔다 — 스크리닝 기능이 발전할 곳은 `pages/모니터링.py`(demo_app.py 전용)다. `indicators.py`/`charts.py`/`predictor.py`는 OHLCV 컬럼 계약(Open/High/Low/Close/Volume, DatetimeIndex)만 맞으면 소스가 주식이든 코인이든 그대로 동작하도록 설계돼 있다 — 새 데이터 소스를 추가할 때도 이 세 모듈은 건드릴 필요가 없어야 한다(실제로 코인 추가 때 그랬다).
 
 ## 데이터 접근 규칙
 
@@ -55,6 +60,8 @@ tests/            pytest
 - **API 키는 절대 코드에 하드코딩하거나 커밋되는 파일에 넣지 않는다.** 항상 `.env` + `config.py`의 `os.environ.get(...)` 패턴을 따른다. 키가 없을 때는 조용히 실패하지 말고 (`DartKeyMissing`처럼) 무엇을 어디서 발급받아야 하는지 알려주는 예외/메시지를 낸다.
 - **뉴스 감성의 과거 히스토리는 조회할 방법이 없다** (뉴스 소스가 최신 기사 목록만 제공). `predictor.py`가 뉴스 피처를 쓰려면 매 실행마다 그날의 감성을 `data/raw/news_sentiment/{종목코드}.parquet`에 누적 기록하는 수밖에 없다 — 기록 시작 전 과거는 중립(0)으로 채운다. 기록은 **`news.log_sentiment_from_news(code, news_df)`** 를 쓴다(저수준 `log_daily_sentiment()`를 직접 부르지 말 것). 평균 점수만 넘기면 심층 모델이 쓰는 긍정/부정/기사 수 피처가 영원히 비어 항상 0이 된다 — 실제로 그렇게 방치됐던 적이 있다.
   - 이 로그는 git으로 추적하는데 **parquet은 같은 내용을 다시 써도 바이트가 달라진다.** 그래서 `log_daily_sentiment()`는 같은 날짜에 같은 값이면 파일을 아예 건드리지 않는다(`_already_logged()`). 이 생략 로직을 지우면 앱을 켤 때마다 워킹 트리가 dirty해진다 — 무의미한 diff 커밋이 실제로 쌓였던 적이 있다. 이 로그는 `data/raw/`에 있어 `.gitignore`가 "재생성 가능한 캐시"로 취급하지만, 실제로는 한 번 지우면 복구 불가능한 유일한 데이터다(다른 data/raw·data/cache 파일과 성격이 다름).
+- **업비트 공개 API(`crypto_loader.py`/`crypto_screener.py`)는 인증 없이 되지만, 벌크로 못 주는 데이터가 있다.** "N일 전 스냅샷"이 없어 `WeeklyChangeRatio`는 항상 NaN(코인 283개 전부의 주간 등락률을 구하려면 종목별 개별 호출이 필요해 "벌크 조회" 원칙에 어긋난다). 시가총액(`Marcap`)도 업비트가 아예 제공하지 않는다(코인마다 발행량 개념도 달라 애매하기도 하다). 재조사해도 데이터 소스 자체의 한계라 안 바뀐다 — `pages/모니터링.py`는 코인 모드에서 시가총액 탭·주간 옵션을 아예 숨긴다.
+- **코인 뉴스는 종목코드 기반 소스가 없다.** 네이버 금융처럼 코인 코드로 뉴스 목록을 주는 곳이 없어서(`m.stock.naver.com/crypto`는 API가 JS 번들에 숨은 SPA라 스크래핑 불가), `crypto_news.py`는 `search.naver.com` **키워드 검색**(코인 한글명)으로 우회한다. 검색 결과 카드에서 "네이버뉴스" 배지 링크를 기준으로 같은 카드 안의 원문 언론사 링크를 헤드라인으로 추출하는 구조적 휴리스틱을 쓴다(클래스명이 아니라 구조에 의존 — 이 페이지의 컴포넌트 클래스명은 `finance.naver.com`보다 훨씬 자주 바뀌는 것으로 보인다). 짧고 모호한 코인명은 검색 결과가 0건일 수 있다(실측: "리플" 0건, "리플 코인" 5건) — 호출부가 빈 결과를 정상 처리해야 한다. 기사 본문 조회·요약·감성 판정·감성 히스토리 기록은 원문이 결국 `n.news.naver.com`이라 `news.py` 함수를 그대로 재사용한다(중복 구현 없음).
 
 ## 가격 예측(ML) 기능 작성 규칙
 

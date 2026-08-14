@@ -36,7 +36,7 @@ VS Code에서는 인터프리터가 `.venv` 로, 노트북 커널이 **Python (v
 ## 구조
 
 ```
-├── app.py                스크리닝 대시보드 (Streamlit)
+├── app.py                스크리닝 대시보드 (Streamlit, 단독 배포 — 아래 pages/모니터링.py와 별개로 그대로 유지)
 ├── src/
 │   ├── config.py         경로·기본값·자주 쓰는 티커(INDICES, MACRO)
 │   ├── cache_utils.py    parquet 캐시 공용 유틸
@@ -48,14 +48,18 @@ VS Code에서는 인터프리터가 `.venv` 로, 노트북 커널이 **Python (v
 │   ├── sentiment.py      키워드 기반 감성(상승지표) 판정
 │   ├── dart.py           DART 전자공시 OpenAPI 연동 (API 키 필요)
 │   ├── predictor.py      가격 예측 (기본: 릿지 회귀 / "정확한 예측": Ridge·RandomForest·GradientBoosting 교차검증 비교, 종목별 그때그때 학습 + 홀드아웃 검증)
-│   └── plotting.py       matplotlib 한글 폰트 및 기본 스타일 (노트북용)
+│   ├── crypto_loader.py  업비트 공개 API 래퍼 — data_loader.py의 코인 버전 (OHLCV 컬럼 계약 동일)
+│   ├── crypto_screener.py 업비트 KRW 마켓 전종목 시세 벌크 스크리닝 — screener.py의 코인 버전
+│   ├── crypto_news.py    코인 뉴스 (네이버 뉴스 키워드 검색) — 이후 파이프라인은 news.py 재사용
 │   ├── portfolio.py      모의투자 원장(현금·보유종목·거래이력·자산추이) 읽기/쓰기 — CSV
-│   └── trading_agent.py  모의투자 매매 규칙 엔진 + 리스크 가드레일 (외부 API 없는 결정론적 로직)
+│   ├── trading_agent.py  모의투자 매매 규칙 엔진 + 리스크 가드레일 (외부 API 없는 결정론적 로직)
+│   └── plotting.py       matplotlib 한글 폰트 및 기본 스타일 (노트북용)
 ├── pages/
+│   ├── 모니터링.py        국내증시/코인 전환형 스크리닝·차트·예측·뉴스 (app.py의 확장판, demo_app.py 전용)
 │   └── 모의투자.py        모의투자 성과 리포팅 화면 (원장 읽기 전용, demo_app.py 전용)
 ├── scripts/
 │   └── run_daily_trading.py  모의투자 일일 매매 실행 진입점 (GitHub Actions가 매일 호출)
-├── demo_app.py            기존 app.py + 모의투자 화면을 묶은 별도 데모 진입점 (app.py는 그대로 유지)
+├── demo_app.py            pages/모니터링.py + pages/모의투자.py를 묶은 별도 데모 진입점
 ├── .github/workflows/
 │   └── daily_trading.yml  모의투자 일일 매매 스케줄러
 ├── notebooks/
@@ -72,7 +76,12 @@ VS Code에서는 인터프리터가 `.venv` 로, 노트북 커널이 **Python (v
 
 ```powershell
 .venv\Scripts\streamlit.exe run app.py
+
+# 또는 국내증시/코인을 좌상단에서 전환할 수 있는 확장판 (아래 "코인 모드" 참고)
+.venv\Scripts\streamlit.exe run demo_app.py
 ```
+
+아래 설명은 `app.py` 기준이며, `demo_app.py`의 "모니터링" 페이지에서 **국내증시**를 선택했을 때도 완전히 동일합니다(`app.py`는 수정 없이 별도 배포로 계속 유지되고, `demo_app.py`는 그 기능을 코인까지 확장한 새 페이지를 얹은 것뿐입니다).
 
 브라우저(기본 http://localhost:8501)에서:
 
@@ -118,6 +127,27 @@ KOSPI+KOSDAQ 약 2,900종목을 개별 조회하면 수 분이 걸립니다. 대
   - 여러 모델을 학습하고 교차검증까지 돌기 때문에 기본 예측보다 느립니다.
 - **뉴스 감성 피처의 한계**: 뉴스 소스는 과거 특정 날짜의 감성을 조회할 방법이 없고 최신 기사만 볼 수 있습니다. 그래서 앱을 실행할 때마다(뉴스를 조회할 때마다) 그날의 감성 통계(평균 점수 + 긍정·부정 기사 수 + 총 기사 수)를 종목별로 `data/raw/news_sentiment/{종목코드}.parquet`에 누적 기록하고, 기록 이전 과거 구간은 중립(0)으로 채웁니다. 즉 **오늘부터 실제 히스토리가 쌓이기 시작**하는 구조라, 초반에는 이 피처의 영향력이 거의 0입니다(모델 상세의 회귀계수로 확인 가능) — 매일 대시보드를 쓸수록 점점 유의미해집니다.
   - ⚠️ 이 로그 파일은 `data/raw/`에 있어 현재 `.gitignore`(다른 캐시처럼 "재생성 가능"으로 분류)에 걸려 있습니다. 하지만 이건 한 번 지우면 과거로 되돌아가 다시 쌓을 수 없는 유일한 데이터입니다 — 나중에 git을 초기화하게 되면 `data/raw/news_sentiment/`만 예외로 추적할지 고려하세요.
+
+### 코인 모드 (모니터링 페이지 전용)
+
+`demo_app.py`의 "모니터링" 페이지 좌상단에서 **국내증시 / 코인**을 전환할 수 있습니다. 코인
+모드는 위 기능과 최대한 동일하게 맞췄지만, 데이터 소스가 완전히 달라 아래 차이가 있습니다.
+
+- **시세**: [업비트](https://upbit.com) 공개 API(`src/crypto_loader.py`). 로그인·키 불필요. KRW
+  마켓 전종목 시세를 요청 1번으로 벌크 조회하고(`src/crypto_screener.py`), 개별 코인의 일봉은
+  `data_loader.get_price()`와 똑같은 OHLCV 형태로 반환되어 지표·차트·예측 로직을 그대로 씁니다.
+- **시가총액 탭·주간 등락률이 없습니다.** 업비트 API가 이 둘을 벌크로 제공하지 않아서입니다
+  (코인마다 발행량 개념도 달라 시가총액 자체가 애매하기도 합니다) — 코인은 24시간 등락률과
+  거래대금 탭만 있습니다.
+- **공시(DART) 탭이 없습니다.** 코인에는 해당 개념이 없어 탭 자체가 안 뜹니다.
+- **뉴스**는 종목코드 기반이 아니라 **네이버 뉴스 키워드 검색**(코인 한글명)입니다
+  (`src/crypto_news.py`). 짧고 모호한 코인명은 검색 결과가 0건일 수 있습니다(예: "리플"). 검색
+  결과가 나오면 그 이후(본문 조회·요약·상승지표 판정·감성 히스토리 기록)는 주식과 완전히
+  동일한 파이프라인(`news.py`)을 재사용합니다 — 감성 로그는 `data/raw/news_sentiment/KRW-BTC.parquet`처럼
+  업비트 마켓코드로 저장되어 종목코드(6자리 숫자) 로그와 겹치지 않습니다.
+- **거래량 단위**가 "주"가 아니라 코인 자체 단위입니다(예: `62.4944BTC`).
+- 화면 전환 시 이전에 보던 종목이 다른 시장으로 새지 않도록, 선택 상태는 국내증시/코인 각각
+  따로 기억됩니다.
 
 ## 모의투자 (페이퍼 트레이딩)
 
