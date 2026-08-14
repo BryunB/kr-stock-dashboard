@@ -6,14 +6,14 @@ name: 모의투자 일일 매매
 # 완전히 분리돼 있다 (방문자가 매매를 유발하지 않는다).
 
 on:
-  workflow_dispatch: # 수동 실행 버튼. 처음엔 이걸로만 여러 번 돌려 커밋·푸시가
-    # 정상인지 눈으로 확인한 뒤, 아래 schedule 블록의 주석을 해제해서 자동 스케줄을 켠다.
-  # schedule:
-  #   # 19:30 KST(UTC+9) = 10:30 UTC, 평일(월~금)만. KRX 스냅샷 확정 시각을 실측해서
-  #   # 정한 값이다 — PRD 5.5 "KRX 스냅샷 갱신 시각" 표 참고. 스냅샷이 아직 없는 날엔
-  #   # run_daily_trading.py가 매매 없이 조용히 종료하므로(휴장일 포함) cron 자체는
-  #   # 매 평일 그대로 켜둬도 안전하다.
-  #   - cron: "30 10 * * 1-5"
+  workflow_dispatch: # 수동 실행 버튼 — 디버깅/재검증용으로 계속 남겨둔다.
+  schedule:
+    # 19:30 KST(UTC+9) = 10:30 UTC, 평일(월~금)만. KRX 스냅샷 확정 시각을 실측해서
+    # 정한 값이다 — PRD 5.5 "KRX 스냅샷 갱신 시각" 표 참고. 스냅샷이 아직 없는 날엔
+    # run_daily_trading.py가 매매 없이 조용히 종료하므로(휴장일 포함) cron 자체는
+    # 매 평일 그대로 켜둬도 안전하다. workflow_dispatch로 실전 매매 1회 성공 확인 후
+    # 활성화 (2026-08-14, 커밋 c0f667f).
+    - cron: "30 10 * * 1-5"
 
 permissions:
   contents: write # 원장 커밋·푸시에 기본 GITHUB_TOKEN만 쓴다 — 별도 PAT 불필요 (CLAUDE.md 참고)
