@@ -25,10 +25,13 @@ _RESULT_COLS = [
     "Close",
     "DailyChangeRatio",
     "WeeklyChangeRatio",
+    "MonthlyChangeRatio",
     "Volume",
     "Amount",
     "Marcap",
 ]
+
+_MONTHLY_DAYS_BACK = 30  # "월간" 비교 기준 — days_back(주간용, 기본 7)과 별개로 고정
 
 
 def _snapshot_on(date: pd.Timestamp) -> pd.DataFrame | None:
@@ -61,15 +64,19 @@ def screen(
     min_volume: float = 0.0,
     use_cache: bool = True,
 ) -> pd.DataFrame:
-    """일간·주간 등락률이 포함된 전종목 스크리닝 테이블을 반환한다.
+    """일간·주간·월간 등락률이 포함된 전종목 스크리닝 테이블을 반환한다.
 
     market: 'ALL'(KOSPI+KOSDAQ) | 'KOSPI' | 'KOSDAQ'
-    days_back: 비교 기준 며칠 전(달력 기준)인지. 기본 7일 = 1주일 전.
+    days_back: "주간" 비교 기준 며칠 전(달력 기준)인지. 기본 7일 = 1주일 전.
     min_marcap: 이 시가총액(원) 미만인 종목은 제외. 초소형주 노이즈 제거용.
     min_volume: 이 거래량 미만(거래정지 등 0거래량 포함)인 종목은 제외.
+
+    "월간" 비교는 days_back과 별개로 항상 30일 전 스냅샷을 쓴다(파라미터화하지 않음 —
+    호출부가 굳이 바꿀 이유가 없다). 30일 전 스냅샷이 없으면(신규 상장 등) 해당 종목만
+    MonthlyChangeRatio가 NaN이 되고 전체 조회가 실패하지는 않는다.
     """
     key = f"{market}|{days_back}|{min_marcap}|{min_volume}"
-    path = cache_path("screen", key)
+    path = cache_path("screen2", key)  # v2: MonthlyChangeRatio 추가로 스키마가 바뀌어 kind를 분리
     if use_cache and is_fresh(path):
         return pd.read_parquet(path)
 
@@ -81,12 +88,27 @@ def screen(
     if past is None:
         raise RuntimeError(f"{days_back}일 전 근처 스냅샷을 찾지 못했습니다")
 
+    _, past_month = _nearest_snapshot(latest_date - pd.Timedelta(days=_MONTHLY_DAYS_BACK))
+
     merged = latest.merge(
         past[["Code", "Close"]].rename(columns={"Close": "ClosePrev"}),
         on="Code",
         how="left",
     )
     merged["WeeklyChangeRatio"] = (merged["Close"] - merged["ClosePrev"]) / merged["ClosePrev"] * 100
+
+    if past_month is not None:
+        merged = merged.merge(
+            past_month[["Code", "Close"]].rename(columns={"Close": "ClosePrevMonth"}),
+            on="Code",
+            how="left",
+        )
+        merged["MonthlyChangeRatio"] = (
+            (merged["Close"] - merged["ClosePrevMonth"]) / merged["ClosePrevMonth"] * 100
+        )
+    else:
+        merged["MonthlyChangeRatio"] = float("nan")
+
     merged = merged.rename(columns={"ChagesRatio": "DailyChangeRatio"})
 
     markets = _KRX_MARKETS if market == "ALL" else (market,)

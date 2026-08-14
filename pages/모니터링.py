@@ -17,6 +17,7 @@ from __future__ import annotations
 import html
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from src import charts, config, crypto_loader, crypto_news, crypto_screener, dart, news, predictor, screener
@@ -46,10 +47,19 @@ def _change_html(diff: float, pct: float, *, soft: bool = False) -> str:
 
 
 def _section_title(text: str) -> None:
+    """카드 제목을 스크롤 가능한 컨테이너 상단에 고정(sticky)해서 그린다.
+
+    st.container(height=N)는 내용이 넘치면 내부 스크롤이 생기는데, 제목이 맨 위 콘텐츠로만
+    있으면 스크롤할 때 같이 밀려 올라가 사라진다. position:sticky + top:0으로 컨테이너
+    스크롤 영역 상단에 고정한다 — 배경은 스크롤되는 내용이 뒤로 비치지 않도록 불투명하게
+    높이고 블러를 얹었다(연한 반투명이면 표/차트 내용이 제목 뒤로 겹쳐 보인다).
+    """
     st.markdown(
-        "<div style='background:rgba(127,127,127,0.16);border-radius:6px;"
+        "<div style='background:rgba(127,127,127,0.55);backdrop-filter:blur(6px);"
+        "-webkit-backdrop-filter:blur(6px);border-radius:6px;"
         "padding:0.4rem 0.7rem;margin-bottom:0.5rem;font-weight:700;"
-        f"font-size:1.05rem;line-height:1.3;'>{text}</div>",
+        "font-size:1.05rem;line-height:1.3;position:sticky;top:0;z-index:5;"
+        f"'>{text}</div>",
         unsafe_allow_html=True,
     )
 
@@ -87,13 +97,6 @@ def _crypto_news(keyword: str, n: int) -> pd.DataFrame:
 @st.cache_data(ttl=config.NEWS_CACHE_TTL_SEC, show_spinner="공시 불러오는 중...")
 def _dart(code: str) -> pd.DataFrame:
     return dart.fetch_disclosures(code)
-
-
-def _safe_predict(price_df: pd.DataFrame, horizon: int, sentiment_hist: pd.Series | None) -> dict:
-    try:
-        return predictor.train_and_predict(price_df, horizon=horizon, sentiment_hist=sentiment_hist)
-    except Exception as e:
-        return {"error": f"예측 중 오류가 발생했습니다: {e}"}
 
 
 def _safe_predict_advanced(
@@ -144,6 +147,14 @@ left_col, right_col = st.columns([3, 7], gap="medium")
 
 _TOP_ROW_HEIGHT = 800
 _BOTTOM_ROW_HEIGHT = 380
+# 스크리닝 테이블 높이 상한 — _TOP_ROW_HEIGHT(800)는 우측 "종목 상세" 박스와 시작줄을
+# 맞추려고 고정한 값이라, 좌측 "주가 요약"에는 필터·탭 등을 빼면 여유 공간이 남는다.
+# 예전엔 260으로 낮게 고정해뒀더니 기본 표시개수(30개)에서도 테이블 아래로 빈 여백이
+# 크게 남았다 — 그 위의 필터 행 개수가 시장별로 달라(국내증시가 코인보다 한 줄 더 많음)
+# 상한도 다르게 잡는다. 브라우저로 직접 확인하며 미세조정한 값은 아니라, 실제로 보면서
+# 더 조정이 필요할 수 있다.
+_STOCK_TABLE_HEIGHT = 480
+_CRYPTO_TABLE_HEIGHT = 520
 
 # ==================================================================== 좌측 상단: 스크리닝
 with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
@@ -174,7 +185,7 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
                 display[["종목명", "종가", value_label]],
                 width="stretch",
                 hide_index=True,
-                height=min(30 * (len(display) + 1), 260),
+                height=min(30 * (len(display) + 1), _CRYPTO_TABLE_HEIGHT),
                 column_config=col_config,
                 on_select="rerun",
                 selection_mode="single-row",
@@ -262,7 +273,7 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
                 display[["종목명", "종가", value_label]],
                 width="stretch",
                 hide_index=True,
-                height=min(30 * (len(display) + 1), 260),
+                height=min(30 * (len(display) + 1), _STOCK_TABLE_HEIGHT),
                 column_config=col_config,
                 on_select="rerun",
                 selection_mode="single-row",
@@ -275,10 +286,14 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
         with rise_tab:
             c1, c2 = st.columns(2)
             with c1:
-                basis = st.radio("기준", ["일간", "주간"], horizontal=True)
+                basis = st.radio("기준", ["일간", "주간", "월간"], horizontal=True)
             with c2:
                 direction = st.radio("방향", ["상승", "하락"], horizontal=True)
-            basis_col = "DailyChangeRatio" if basis == "일간" else "WeeklyChangeRatio"
+            basis_col = {
+                "일간": "DailyChangeRatio",
+                "주간": "WeeklyChangeRatio",
+                "월간": "MonthlyChangeRatio",
+            }[basis]
             ranked_rise = screener.top_movers(
                 universe, by=basis_col, n=top_n, ascending=(direction == "하락")
             )
@@ -479,10 +494,26 @@ with right_col:
         m4.metric("샤프", f"{summary['sharpe']:.2f}")
         m5.metric("MDD", f"{summary['max_drawdown'] * 100:.1f}%")
 
+_HORIZON_PRESETS = (5, 15, 30)
+
+
+def _apply_horizon_preset(preset: int) -> None:
+    """체크박스가 방금 체크됐을 때만(체크 해제 시엔 무시) 입력값을 그 값으로 맞추고,
+    나머지 프리셋 체크박스는 꺼서 라디오처럼 하나만 선택된 것처럼 보이게 한다."""
+    if st.session_state.get(f"horizon_preset_{preset}"):
+        st.session_state["custom_horizon"] = preset
+        for other in _HORIZON_PRESETS:
+            if other != preset:
+                st.session_state[f"horizon_preset_{other}"] = False
+
+
 # ==================================================================== 좌측 하단: 가격 예측
 with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGHT):
     _section_title("💹 가격 예측")
-    st.caption("⚠️ 참고용 추정치이며 투자 조언이 아닙니다.")
+    st.caption(
+        "⚠️ 참고용 추정치이며 투자 조언이 아닙니다. Ridge/RandomForest/GradientBoosting을 "
+        "시계열 교차검증으로 비교한 모델로 예측합니다(보유한 전체 기간 데이터 사용)."
+    )
 
     try:
         if is_crypto:
@@ -491,81 +522,102 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
             news.log_sentiment_from_news(selected_code, _news(selected_code, 10))
     except Exception:
         pass
-    sentiment_hist = news.sentiment_history(selected_code)
 
-    pred_1d = _safe_predict(price_df, horizon=1, sentiment_hist=sentiment_hist)
-    pred_5d = _safe_predict(price_df, horizon=5, sentiment_hist=sentiment_hist)
-
-    pcol1, pcol2 = st.columns(2)
-    for col, pred, label in [(pcol1, pred_1d, "다음 거래일"), (pcol2, pred_5d, "5거래일 후")]:
+    st.markdown("**몇 거래일 후를 예측할까요?**")
+    pcols = st.columns(len(_HORIZON_PRESETS))
+    for col, preset in zip(pcols, _HORIZON_PRESETS, strict=True):
         with col:
-            st.markdown(f"**{label}**")
-            if "error" in pred:
-                st.info(pred["error"])
-                continue
-            delta = pred["predicted_price"] - pred["last_close"]
-            st.metric(pred["target_date"].strftime("%m-%d(%a)"), f"{pred['predicted_price']:,.0f}원")
-            st.markdown(
-                _change_html(delta, pred["predicted_return"] * 100, soft=True), unsafe_allow_html=True
-            )
-            st.caption(
-                f"검증{pred['n_test']}일 · MAE {pred['mae']:,.0f}원 · "
-                f"MAPE {pred['mape'] * 100:.1f}% · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
+            st.checkbox(
+                f"{preset}일",
+                key=f"horizon_preset_{preset}",
+                on_change=_apply_horizon_preset,
+                args=(preset,),
             )
 
-    if st.button(
-        "🎯 정확한 예측 (심층 학습)",
-        help=(
-            "Ridge/RandomForest/GradientBoosting을 시계열 교차검증으로 비교해 가장 좋은 모델로 다시 "
-            "예측합니다. 조회 기간과 무관하게 보유한 전체 기간 데이터를 쓰며, 기본 예측보다 시간이 더 걸립니다."
-        ),
-    ):
-        with st.spinner("여러 모델을 교차검증하며 심층 학습하는 중..."):
-            full_price_df = (
-                _crypto_price(selected_code, config.DEFAULT_START)
-                if is_crypto
-                else _price(selected_code, config.DEFAULT_START)
-            )
-            sentiment_hist_full = news.sentiment_history_full(selected_code)
-            st.session_state["adv_pred"] = {
-                "code": selected_code,
-                "1d": _safe_predict_advanced(
-                    full_price_df, horizon=1, sentiment_hist_full=sentiment_hist_full
-                ),
-                "5d": _safe_predict_advanced(
-                    full_price_df, horizon=5, sentiment_hist_full=sentiment_hist_full
-                ),
-            }
+    st.session_state.setdefault("custom_horizon", 5)
+    hcol1, hcol2 = st.columns([2, 1])
+    with hcol1:
+        st.number_input("거래일 수", min_value=1, max_value=60, step=1, key="custom_horizon")
+    with hcol2:
+        st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
+        if st.button("조회", key="custom_horizon_query"):
+            horizon = int(st.session_state["custom_horizon"])
+            with st.spinner("여러 모델을 교차검증하며 심층 학습하는 중..."):
+                full_price_df = (
+                    _crypto_price(selected_code, config.DEFAULT_START)
+                    if is_crypto
+                    else _price(selected_code, config.DEFAULT_START)
+                )
+                sentiment_hist_full = news.sentiment_history_full(selected_code)
+                st.session_state["adv_pred"] = {
+                    "code": selected_code,
+                    "horizon": horizon,
+                    "result": _safe_predict_advanced(
+                        full_price_df, horizon=horizon, sentiment_hist_full=sentiment_hist_full
+                    ),
+                }
 
     adv_pred = st.session_state.get("adv_pred")
     if adv_pred and adv_pred["code"] == selected_code:
-        st.markdown("**🎯 심층 학습 결과**")
-        acol1, acol2 = st.columns(2)
-        for col, pred, label in [
-            (acol1, adv_pred["1d"], "다음 거래일"),
-            (acol2, adv_pred["5d"], "5거래일 후"),
-        ]:
-            with col:
-                st.markdown(f"**{label}**")
-                if "error" in pred:
-                    st.info(pred["error"])
-                    continue
-                delta = pred["predicted_price"] - pred["last_close"]
+        horizon = adv_pred["horizon"]
+        pred = adv_pred["result"]
+        st.markdown(f"**{horizon}거래일 후 예측**")
+        if "error" in pred:
+            st.info(pred["error"])
+        else:
+            pred_col, info_col = st.columns([1, 1])
+            with pred_col:
                 st.metric(pred["target_date"].strftime("%m-%d(%a)"), f"{pred['predicted_price']:,.0f}원")
+            with info_col:
+                st.markdown("<div style='height:0.35em'></div>", unsafe_allow_html=True)
                 st.markdown(
-                    _change_html(delta, pred["predicted_return"] * 100, soft=True), unsafe_allow_html=True
+                    _change_html(
+                        pred["predicted_price"] - pred["last_close"],
+                        pred["predicted_return"] * 100,
+                        soft=True,
+                    ),
+                    unsafe_allow_html=True,
                 )
                 st.caption(
                     f"{pred['best_model']} · 검증{pred['n_holdout']}일 · MAE {pred['mae']:,.0f}원 · "
                     f"MAPE {pred['mape'] * 100:.1f}% · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
                 )
 
-        with st.expander("심층 모델 상세 (교차검증 비교 · 피처 영향도)"):
-            for pred, label in [(adv_pred["1d"], "다음 거래일 모델"), (adv_pred["5d"], "5거래일 후 모델")]:
-                if "error" in pred:
-                    continue
+            # ---------------------------------------------- 실제 추이(실선) + 예측 추이(대시선)
+            lookback = max(30, horizon * 5)  # 예측 기간에 비례해 과거 구간도 넉넉히 보여준다
+            hist = price_df.tail(lookback)
+            pred_color = (
+                UP_SOFT
+                if pred["predicted_price"] > pred["last_close"]
+                else DOWN_SOFT
+                if pred["predicted_price"] < pred["last_close"]
+                else FLAT_SOFT
+            )
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(x=hist.index, y=hist["Close"], name="실제", line=dict(width=1.8, color="#0ea5e9"))
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[hist.index[-1], pred["target_date"]],
+                    y=[hist["Close"].iloc[-1], pred["predicted_price"]],
+                    name=f"{horizon}거래일 후 예측",
+                    line=dict(width=2, color=pred_color, dash="dash"),
+                )
+            )
+            fig.update_layout(
+                height=200,
+                margin=dict(l=10, r=10, t=10, b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig, width="stretch")
+            st.caption(
+                "예측선은 마지막 실제 종가와 예측값을 직선으로 이은 것으로, 그 사이의 실제 경로를 뜻하지 않습니다."
+            )
+
+            with st.expander("모델 상세 (교차검증 비교 · 피처 영향도)"):
                 st.markdown(
-                    f"**{label}** — 선정: {pred['best_model']} · 학습 {pred['n_train']}행 / "
+                    f"선정: {pred['best_model']} · 학습 {pred['n_train']}행 / "
                     f"홀드아웃 {pred['n_holdout']}행 · 뉴스 감성 히스토리 {pred['news_days']}일 누적"
                 )
                 cv_df = pd.DataFrame(
@@ -582,32 +634,13 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
                     hide_index=True,
                     width="stretch",
                 )
-            st.caption(
-                "교차검증 점수는 모델을 고르는 데만 쓰였고, 위 정확도는 모델 선정에 관여하지 않은 "
-                "마지막 홀드아웃 구간 기준입니다. 중요도 값은 모델별로 계산 방식이 다릅니다"
-                "(회귀계수 / 트리 중요도 / 순열 중요도)."
-            )
+                st.caption(
+                    "교차검증 점수는 모델을 고르는 데만 쓰였고, 위 정확도는 모델 선정에 관여하지 않은 "
+                    "마지막 홀드아웃 구간 기준입니다. 중요도 값은 모델별로 계산 방식이 다릅니다"
+                    "(회귀계수 / 트리 중요도 / 순열 중요도)."
+                )
     else:
-        st.caption("클릭 시 여러 모델을 교차검증으로 비교해 보유한 전체 기간 데이터로 다시 예측합니다.")
-
-    with st.expander("모델 상세 (피처 영향도)"):
-        for pred, label in [(pred_1d, "다음 거래일 모델"), (pred_5d, "5거래일 후 모델")]:
-            if "error" in pred:
-                continue
-            st.markdown(
-                f"**{label}** — 학습 {pred['n_train']}행 / 검증 {pred['n_test']}행 · "
-                f"뉴스 감성 히스토리 {pred['news_days']}일 누적"
-            )
-            st.dataframe(
-                pred["feature_importance"].rename(columns={"label": "설명", "coef": "회귀계수"})[
-                    ["설명", "회귀계수"]
-                ],
-                hide_index=True,
-                width="stretch",
-            )
-        st.caption(
-            "회귀계수가 클수록(절대값 기준) 예측에 미치는 영향이 큽니다. 뉴스 감성은 히스토리가 쌓일수록 값이 유의미해집니다."
-        )
+        st.caption("거래일 수를 정하고 조회를 누르면 예측 결과가 여기 표시됩니다.")
 
 # ==================================================================== 우측 하단: 뉴스 & 공시
 with right_col:
