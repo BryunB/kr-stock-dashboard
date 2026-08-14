@@ -1,6 +1,6 @@
 # PRD — 모의투자(페이퍼 트레이딩) 기능
 
-- **상태**: 0~5단계(KRX 타이밍 실측, 포트폴리오 원장, 매매 규칙 엔진+가드레일, 실행 스크립트, 성과 리포팅 UI, 스케줄러 워크플로 코드) 완료. 다만 5단계는 코드만 완료고 **GitHub 저장소에서 수동 실행 검증 + `schedule` 활성화가 아직 남아 있다**(로컬 불가 항목, 10장 5·6단계 참고) — v4 (매매 의사결정을 **LLM 기반 → 규칙 기반(결정론적)으로 전환**. 유료 서비스인 Claude API 키 발급·비용을 지금 단계에서는 넘기고 싶다는 사용자 결정에 따름. LLM 경로는 폐기가 아니라 9장에 향후 옵션으로 보존)
+- **상태**: 0~5단계(KRX 타이밍 실측, 포트폴리오 원장, 매매 규칙 엔진+가드레일, 실행 스크립트, 성과 리포팅 UI, 스케줄러 워크플로) 완료 — `workflow_dispatch` 수동 실행으로 실전 매매 1회 성공까지 확인(2026-08-14, 커밋 `c0f667f`). **`schedule`(자동 cron) 활성화는 사용자 승인 대기 중**, 그 다음은 6단계(며칠 관찰) — 10장 참고 — v4 (매매 의사결정을 **LLM 기반 → 규칙 기반(결정론적)으로 전환**. 유료 서비스인 Claude API 키 발급·비용을 지금 단계에서는 넘기고 싶다는 사용자 결정에 따름. LLM 경로는 폐기가 아니라 9장에 향후 옵션으로 보존)
 - **관련 문서**: [CLAUDE.md](./CLAUDE.md) `## 모의투자(페이퍼 트레이딩) 기능` 섹션에 컨벤션 요약
 - **스코프**: 이 문서는 기존 스크리닝/차트/예측 대시보드에 새로 추가하는 "모의투자" 기능 하나에 한정한다. 기존 기능의 PRD를 소급 작성하지 않는다.
 
@@ -372,15 +372,24 @@ pg.run()
    렌더링되는 것을 확인했고, `streamlit run demo_app.py`를 8502 포트로 띄워 실제 서버가 에러 없이
    기동하는 것도 확인했다(Chrome 브라우저 도구가 이번 세션에 비활성화돼 있어 실제 화면 스크린샷
    확인은 못 했다 — AppTest의 엘리먼트 트리 검사로 대체).
-5. ~~`.github/workflows/daily_trading.yml` + `requirements-trading.txt` — 스케줄러 연결~~ **코드는 완료
-   (2026-08-14), 자동 스케줄 활성화는 아직.** `workflow_dispatch`만 켜져 있고 `schedule` 블록은
-   주석 처리된 채로 커밋된다 — 실제 GitHub 저장소에 push한 뒤 "Run workflow" 버튼으로 여러 번
-   수동 실행해 커밋·푸시가 정상인지 **눈으로 확인하는 절차가 아직 남아 있다**(로컬에서는 검증
-   불가능한 부분). 확인되면 `daily_trading.yml`의 `schedule` 주석(`cron: "30 10 * * 1-5"` —
-   19:30 KST 실측값)을 해제해 자동 스케줄을 켠다. `requirements-trading.txt`는
-   `scripts/run_daily_trading.py`의 전체 import 체인(portfolio·trading_agent·screener·
-   data_loader·indicators·news·predictor·config·sentiment)을 직접 추적해서 만들었고, 버전은
-   `requirements.txt`와 동일하게 고정(이미 이 환경에서 검증된 조합). 신규 시크릿은 없다(V1은
-   규칙 기반이라 `ANTHROPIC_API_KEY` 불필요, `permissions: contents: write`로 기본
-   `GITHUB_TOKEN`만으로 커밋·푸시).
+5. ~~`.github/workflows/daily_trading.yml` + `requirements-trading.txt` — 스케줄러 연결~~ **완료
+   (2026-08-14), `workflow_dispatch` 수동 실행으로 실전 검증까지 마쳤다.** 진행 중 실제로 겪은
+   버그와 수정:
+   - **`ModuleNotFoundError: matplotlib`**: `src/__init__.py`가 모든 서브모듈을 eager import하고
+     있어서 `from src import data_loader`만 해도 `plotting.py`(matplotlib)까지 끌려 들어왔다.
+     `requirements-trading.txt`는 matplotlib을 의도적으로 뺐으므로 최초 import 단계에서 죽었다.
+     호출부가 이미 전부 명시적 서브모듈 import를 쓰므로 `__init__.py`의 eager import를 제거해
+     해결(커밋 `8d789f3`). 격리된 venv(트레이딩 의존성만 설치)로 재현·검증.
+   - **"Re-run jobs"의 함정**: 수정 커밋을 push한 뒤에도 GitHub UI에서 실패한 run을 "Re-run
+     jobs"로 재시도하면 **그 run이 원래 트리거됐던 시점의 커밋을 그대로 재사용**해서 새 커밋이
+     반영되지 않는다(같은 에러가 반복돼서 헷갈렸던 지점). 새 커밋을 반영하려면 Actions 탭에서
+     **"Run workflow"**로 완전히 새 run을 만들어야 한다.
+   - **최초 실전 실행 결과(2026-08-14, 커밋 `c0f667f`)**: 워치리스트 40종목 중 37개 신호 생성
+     (2종목은 네이버 뉴스 타임아웃 — 설계대로 해당 종목만 스킵하고 계속 진행), 매수 4건 체결,
+     원장 커밋·푸시 정상. `workflow_dispatch`만 켜져 있고 `schedule`은 여전히 주석 처리 상태 —
+     활성화는 사용자 승인 후 진행.
+   - `requirements-trading.txt`는 `scripts/run_daily_trading.py`의 전체 import 체인을 직접
+     추적해서 만들었고, 버전은 `requirements.txt`와 동일하게 고정(이미 이 환경에서 검증된 조합).
+     신규 시크릿은 없다(V1은 규칙 기반이라 `ANTHROPIC_API_KEY` 불필요, `permissions:
+     contents: write`로 기본 `GITHUB_TOKEN`만으로 커밋·푸시).
 6. 실제 배포 환경에서 며칠 관찰 — 영속성(커밋이 실제로 쌓이는지), 타이밍(0단계 실측대로 맞는지), 휴장일 스킵, Streamlit 쪽에서 갱신된 원장이 보이는지. 로컬에서는 검증 불가능한 부분이므로 이 단계를 건너뛰지 않는다.
