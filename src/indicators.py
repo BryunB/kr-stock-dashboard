@@ -141,6 +141,51 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return df.resample(rule).agg(agg).dropna(subset=["Open"])
 
 
+def volume_profile(df: pd.DataFrame, bins: int = 24) -> pd.DataFrame:
+    """가격대별 매물대(누적 거래량). df는 High/Low/Volume 컬럼이 필요하다.
+
+    조회 구간 전체의 최저가~최고가를 bins개 가격 구간으로 나누고, 각 봉의 거래량을
+    "그 봉이 저가~고가 사이 어느 구간에서 거래됐는지"에 비례해 나눠 담는다(종가 하나에만
+    몰아주지 않는다 — 그러면 봉 하나가 실제로 거래된 가격 범위를 무시하게 된다). 도지처럼
+    저가=고가인 봉은 그 가격이 속한 구간 하나에 전량 배정한다.
+
+    반환: price_low/price_high/price_mid/volume 컬럼, bins행, 가격 낮은 구간부터 순서대로.
+    """
+    cols = ["price_low", "price_high", "price_mid", "volume"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    lo, hi = float(df["Low"].min()), float(df["High"].max())
+    if lo >= hi:
+        return pd.DataFrame(columns=cols)
+
+    edges = np.linspace(lo, hi, bins + 1)
+    vol = np.zeros(bins)
+    for row_low, row_high, row_vol in zip(df["Low"], df["High"], df["Volume"], strict=True):
+        if row_vol <= 0:
+            continue
+        if row_high <= row_low:
+            idx = min(max(np.searchsorted(edges, row_low, side="right") - 1, 0), bins - 1)
+            vol[idx] += row_vol
+            continue
+        start_idx = max(np.searchsorted(edges, row_low, side="right") - 1, 0)
+        end_idx = min(np.searchsorted(edges, row_high, side="left"), bins - 1)
+        span = row_high - row_low
+        for i in range(start_idx, end_idx + 1):
+            overlap = min(row_high, edges[i + 1]) - max(row_low, edges[i])
+            if overlap > 0:
+                vol[i] += row_vol * (overlap / span)
+
+    return pd.DataFrame(
+        {
+            "price_low": edges[:-1],
+            "price_high": edges[1:],
+            "price_mid": (edges[:-1] + edges[1:]) / 2,
+            "volume": vol,
+        }
+    )
+
+
 # ---------------------------------------------------------------- 수익률/성과
 
 

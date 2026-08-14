@@ -490,24 +490,31 @@ with right_col:
 
         enriched = ind.add_all(chart_price_df)
 
-        ctype_col, log_col, _spacer = st.columns([1.4, 1, 3.6])
+        # 컬럼을 잘게 쪼갤수록(예전엔 체크박스 10개를 한 줄에) 좁은 화면에서 Streamlit이
+        # 모바일 스택 레이아웃으로 전환해버려서 PC 화면 비율이 세로로 길게 깨졌다 —
+        # 개별 체크박스 대신 멀티셀렉트로 묶어서 한 줄당 컬럼 수를 4개로 줄였다.
+        ma_col, ind_col, ctype_col, log_col = st.columns([1.5, 2.1, 1.3, 0.9])
+        with ma_col:
+            ma_sel = st.multiselect("이동평균", SMA_CHOICES, default=[20, 60])
+        with ind_col:
+            ind_sel = st.multiselect(
+                "보조지표",
+                ["볼린저밴드", "거래량", "RSI", "MACD", "스토캐스틱", "일목균형표", "매물대"],
+                default=["거래량"],
+            )
         with ctype_col:
             chart_type_label = st.selectbox("차트 유형", _CHART_TYPES, index=0)
         with log_col:
             st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
             log_y = st.checkbox("로그축", value=False)
 
-        ic = st.columns(10)
-        show_sma5 = ic[0].checkbox("SMA5", value=False)
-        show_sma20 = ic[1].checkbox("SMA20", value=True)
-        show_sma60 = ic[2].checkbox("SMA60", value=True)
-        show_sma120 = ic[3].checkbox("SMA120", value=False)
-        show_bb = ic[4].checkbox("볼밴드", value=False)
-        show_vol = ic[5].checkbox("거래량", value=True)
-        show_rsi = ic[6].checkbox("RSI", value=False)
-        show_macd = ic[7].checkbox("MACD", value=False)
-        show_stoch = ic[8].checkbox("스토캐스틱", value=False)
-        show_ichimoku = ic[9].checkbox("일목균형표", value=False)
+        show_bb = "볼린저밴드" in ind_sel
+        show_vol = "거래량" in ind_sel
+        show_rsi = "RSI" in ind_sel
+        show_macd = "MACD" in ind_sel
+        show_stoch = "스토캐스틱" in ind_sel
+        show_ichimoku = "일목균형표" in ind_sel
+        show_vp = "매물대" in ind_sel
 
         if show_bb:
             bbcol1, bbcol2 = st.columns(2)
@@ -519,9 +526,7 @@ with right_col:
                 ]
             )
 
-        sma_windows = [
-            w for w, on in [(5, show_sma5), (20, show_sma20), (60, show_sma60), (120, show_sma120)] if on
-        ]
+        sma_windows = list(ma_sel)
         for w in sma_windows:
             col = f"sma{w}"
             if col not in enriched.columns:
@@ -534,6 +539,7 @@ with right_col:
 
         chart_source = ind.heikin_ashi(enriched) if chart_type_label == "하이킨아시" else enriched
         chart_type = "line" if chart_type_label == "라인" else "candle"
+        vp_df = ind.volume_profile(chart_source) if show_vp else None
 
         overlays = {}
         for label in idx_sel:
@@ -558,8 +564,14 @@ with right_col:
             log_y=log_y,
             show_stochastic=show_stoch,
             show_ichimoku=show_ichimoku,
+            volume_profile=vp_df,
+            crosshair=True,
+            drag_pan=True,
+            drawing_tools=True,
         )
-        st.plotly_chart(fig, width="stretch")
+        # scrollZoom은 Figure 속성이 아니라 렌더링 옵션이라 여기서 켠다 — 업비트처럼
+        # 마우스 휠로 확대/축소, 드래그로 이동(위 drag_pan=True)하는 조작감을 맞춘다.
+        st.plotly_chart(fig, width="stretch", config={"scrollZoom": True})
 
         summary = ind.summary(price_df["Close"])
         m1, m2, m3, m4, m5 = st.columns(5)
