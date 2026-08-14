@@ -35,6 +35,19 @@ _CRYPTO_BENCHMARKS = {"비트코인": "KRW-BTC", "이더리움": "KRW-ETH", "리
 _CRYPTO_DEFAULT = ("KRW-BTC", "비트코인")
 _BAR_PERIODS = {"일봉": None, "주봉": "W", "월봉": "ME"}  # 차트 전용 — 시세 요약·예측은 항상 일봉 기준
 _CHART_TYPES = ("캔들", "라인", "하이킨아시")
+# 분봉/시간봉은 업비트 API 자체(코인)에만 있다 — 주식(FinanceDataReader/GitHub 스냅샷)은
+# 일봉 이하 데이터가 아예 없어서 국내증시 모드에서는 이 옵션 자체를 보여주지 않는다.
+_CRYPTO_MINUTE_PERIODS = {
+    "1분": 1,
+    "3분": 3,
+    "5분": 5,
+    "10분": 10,
+    "15분": 15,
+    "30분": 30,
+    "1시간": 60,
+    "4시간": 240,
+}
+_MINUTE_CANDLE_COUNT = 300  # 최근 N개만 (업비트 요청 상한 200개/회 대비 최대 2회 페이지네이션)
 _STOCK_DEFAULT = ("005930", "삼성전자")
 
 
@@ -84,6 +97,11 @@ def _price(symbol: str, start: str) -> pd.DataFrame:
 @st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="코인 가격 데이터 불러오는 중...")
 def _crypto_price(market: str, start: str) -> pd.DataFrame:
     return crypto_loader.get_price(market, start=start)
+
+
+@st.cache_data(ttl=300, show_spinner="분봉/시간봉 불러오는 중...")  # 일봉보다 훨씬 짧은 캐시 — 자주 바뀐다
+def _crypto_minute_price(market: str, unit: int, count: int) -> pd.DataFrame:
+    return crypto_loader.get_minute_price(market, unit=unit, count=count)
 
 
 @st.cache_data(ttl=config.NEWS_CACHE_TTL_SEC, show_spinner="뉴스 불러오는 중...")
@@ -363,7 +381,12 @@ with right_col:
         with period_col:
             period_label = st.selectbox("조회 기간", list(DATE_RANGES.keys()), index=3)
         with bar_col:
-            bar_label = st.selectbox("봉 주기", list(_BAR_PERIODS.keys()), index=0)
+            bar_options = (
+                list(_CRYPTO_MINUTE_PERIODS.keys()) + list(_BAR_PERIODS.keys())
+                if is_crypto
+                else list(_BAR_PERIODS.keys())
+            )
+            bar_label = st.selectbox("봉 주기", bar_options, index=len(bar_options) - 3 if is_crypto else 0)
         with idx_col:
             if is_crypto:
                 idx_sel = st.multiselect("코인 비교", list(_CRYPTO_BENCHMARKS.keys()), default=[])
@@ -449,11 +472,20 @@ with right_col:
         _notes.append("상승=빨강 / 하락=파랑")
         st.caption(" · ".join(_notes))
 
-        # 봉 주기: 시세 요약·예측은 항상 price_df(일봉)를 쓰고, 차트만 리샘플링한다 —
+        # 봉 주기: 시세 요약·예측은 항상 price_df(일봉)를 쓰고, 차트만 바꾼다 —
         # 업비트도 상단 현재가 티커는 실시간 그대로 두고 캔들 굵기만 바꾼다.
-        bar_rule = _BAR_PERIODS[bar_label]
-        chart_price_df = ind.resample_ohlcv(price_df, bar_rule) if bar_rule else price_df
-        if chart_price_df.empty:  # 리샘플 결과가 비면(데이터가 너무 적음) 안전하게 일봉으로 폴백
+        if bar_label in _CRYPTO_MINUTE_PERIODS:
+            # 분봉/시간봉은 일봉을 리샘플링해서 만들 수 없다(더 잘게 쪼개는 건 원본에
+            # 없던 정보를 만드는 것) — 업비트 분봉 API를 따로 호출한다. 코인 모드에서만
+            # 이 옵션이 보이므로 is_crypto 분기가 필요 없다.
+            chart_price_df = _crypto_minute_price(
+                selected_code, _CRYPTO_MINUTE_PERIODS[bar_label], _MINUTE_CANDLE_COUNT
+            )
+            st.caption(f"분봉/시간봉은 최근 {_MINUTE_CANDLE_COUNT}개까지만 제공됩니다(업비트 API 한계).")
+        else:
+            bar_rule = _BAR_PERIODS[bar_label]
+            chart_price_df = ind.resample_ohlcv(price_df, bar_rule) if bar_rule else price_df
+        if chart_price_df.empty:  # 데이터가 비면(너무 짧은 상장 이력 등) 안전하게 일봉으로 폴백
             chart_price_df = price_df
 
         enriched = ind.add_all(chart_price_df)
