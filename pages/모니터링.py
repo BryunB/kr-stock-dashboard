@@ -409,6 +409,11 @@ with right_col:
         if not selected_code:
             selected_code, selected_name = _CRYPTO_DEFAULT if is_crypto else _STOCK_DEFAULT
 
+        # 예전엔 이 이름(코드)를 차트 자체의 Plotly title로 그렸는데, 매물대/레인지셀렉터가
+        # 추가되면서 위쪽 공간이 빡빡해져 차트 상단(캔들/레인지셀렉터 버튼)과 겹쳐 보였다 —
+        # 검색창 바로 아래에 별도 Streamlit 텍스트로 빼서 차트 영역과 아예 분리했다.
+        st.markdown(f"##### {selected_name} ({selected_code})")
+
         days_back = DATE_RANGES[period_label]
         start_date = (
             config.DEFAULT_START
@@ -550,7 +555,7 @@ with right_col:
 
         fig = charts.build_chart(
             chart_source,
-            title=f"{selected_name} ({selected_code})",
+            title="",
             sma_windows=tuple(sma_windows),
             show_bollinger=show_bb,
             show_volume=show_vol,
