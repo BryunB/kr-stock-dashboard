@@ -1,0 +1,13 @@
+# GitHub Actions(daily_trading.yml)가 scripts/run_daily_trading.py를 돌릴 때만 쓰는 최소 의존성.
+# streamlit/jupyterlab/matplotlib/plotly 등 대시보드·노트북 전용 패키지는 일부러 뺐다 —
+# 매일 도는 워크플로에서 안 쓰는 무거운 패키지까지 설치하면 몇 분씩 낭비된다 (CLAUDE.md 참고).
+# 버전은 requirements.txt와 동일하게 고정 — 이미 이 프로젝트에서 검증된 조합이다.
+
+finance-datareader==0.9.202
+pandas==3.0.5
+numpy==2.5.2
+pyarrow==24.0.0           # 뉴스 감성 로그·시세 캐시 parquet 읽기/쓰기에 필요
+scikit-learn==1.9.0       # predictor.py의 릿지 회귀
+requests==2.34.2
+beautifulsoup4==4.15.0    # 네이버 뉴스 스크래핑 (news.py)
+python-dotenv==1.2.2      # config.py가 .env 로드 (V1은 실제로 읽는 키가 없지만 import 시점에 필요)

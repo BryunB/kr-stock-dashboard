@@ -1,0 +1,44 @@
+name: 모의투자 일일 매매
+
+# PRD.md 5.5·10장 5단계 참고. scripts/run_daily_trading.py(①~④를 묶은 단일 진입점)를
+# 매 평일 1회 실행하고, 갱신된 원장(data/portfolio/)을 이 워크플로가 직접 커밋·푸시한다.
+# Streamlit 앱(demo_app.py의 pages/모의투자.py)은 이 결과를 읽기만 한다 — 실행과 조회는
+# 완전히 분리돼 있다 (방문자가 매매를 유발하지 않는다).
+
+on:
+  workflow_dispatch: # 수동 실행 버튼. 처음엔 이걸로만 여러 번 돌려 커밋·푸시가
+    # 정상인지 눈으로 확인한 뒤, 아래 schedule 블록의 주석을 해제해서 자동 스케줄을 켠다.
+  # schedule:
+  #   # 19:30 KST(UTC+9) = 10:30 UTC, 평일(월~금)만. KRX 스냅샷 확정 시각을 실측해서
+  #   # 정한 값이다 — PRD 5.5 "KRX 스냅샷 갱신 시각" 표 참고. 스냅샷이 아직 없는 날엔
+  #   # run_daily_trading.py가 매매 없이 조용히 종료하므로(휴장일 포함) cron 자체는
+  #   # 매 평일 그대로 켜둬도 안전하다.
+  #   - cron: "30 10 * * 1-5"
+
+permissions:
+  contents: write # 원장 커밋·푸시에 기본 GITHUB_TOKEN만 쓴다 — 별도 PAT 불필요 (CLAUDE.md 참고)
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: 매매용 의존성 설치 (requirements-trading.txt만 — streamlit/jupyterlab 등 제외)
+        run: pip install -r requirements-trading.txt
+
+      - name: 일일 매매 실행
+        run: python scripts/run_daily_trading.py
+
+      - name: 원장 변경사항 커밋 · 푸시
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/portfolio/
+          git diff --cached --quiet && echo "원장 변경 없음 — 커밋 스킵" && exit 0
+          git commit -m "모의투자 원장 갱신 ($(date -u +%Y-%m-%d))"
+          git push

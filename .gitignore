@@ -22,6 +22,11 @@ output/
 !data/raw/news_sentiment/
 !data/raw/news_sentiment/*.parquet
 
+# 예외: 모의투자 원장도 추적한다. 재생성 가능한 캐시가 아니라 실제 매매 이력·자산 상태라,
+# 한 번 지우면 복구 불가능하다 (뉴스 감성 히스토리와 같은 이유). 위 *.csv 보다 뒤에 와야 한다.
+!data/portfolio/
+!data/portfolio/*.csv
+
 # 에디터 / OS
 .vscode/*
 !.vscode/settings.json

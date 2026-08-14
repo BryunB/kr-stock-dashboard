@@ -49,11 +49,21 @@ VS Code에서는 인터프리터가 `.venv` 로, 노트북 커널이 **Python (v
 │   ├── dart.py           DART 전자공시 OpenAPI 연동 (API 키 필요)
 │   ├── predictor.py      가격 예측 (기본: 릿지 회귀 / "정확한 예측": Ridge·RandomForest·GradientBoosting 교차검증 비교, 종목별 그때그때 학습 + 홀드아웃 검증)
 │   └── plotting.py       matplotlib 한글 폰트 및 기본 스타일 (노트북용)
+│   ├── portfolio.py      모의투자 원장(현금·보유종목·거래이력·자산추이) 읽기/쓰기 — CSV
+│   └── trading_agent.py  모의투자 매매 규칙 엔진 + 리스크 가드레일 (외부 API 없는 결정론적 로직)
+├── pages/
+│   └── 모의투자.py        모의투자 성과 리포팅 화면 (원장 읽기 전용, demo_app.py 전용)
+├── scripts/
+│   └── run_daily_trading.py  모의투자 일일 매매 실행 진입점 (GitHub Actions가 매일 호출)
+├── demo_app.py            기존 app.py + 모의투자 화면을 묶은 별도 데모 진입점 (app.py는 그대로 유지)
+├── .github/workflows/
+│   └── daily_trading.yml  모의투자 일일 매매 스케줄러
 ├── notebooks/
 │   └── 01_quickstart.ipynb
 ├── data/
 │   ├── raw/              원본 저장용
-│   └── cache/            자동 parquet 캐시 (gitignore)
+│   ├── cache/             자동 parquet 캐시 (gitignore)
+│   └── portfolio/         모의투자 원장 (CSV — git으로 추적, gitignore 예외)
 ├── output/                차트·리포트 산출물 (gitignore)
 └── tests/
 ```
@@ -108,6 +118,23 @@ KOSPI+KOSDAQ 약 2,900종목을 개별 조회하면 수 분이 걸립니다. 대
   - 여러 모델을 학습하고 교차검증까지 돌기 때문에 기본 예측보다 느립니다.
 - **뉴스 감성 피처의 한계**: 뉴스 소스는 과거 특정 날짜의 감성을 조회할 방법이 없고 최신 기사만 볼 수 있습니다. 그래서 앱을 실행할 때마다(뉴스를 조회할 때마다) 그날의 감성 통계(평균 점수 + 긍정·부정 기사 수 + 총 기사 수)를 종목별로 `data/raw/news_sentiment/{종목코드}.parquet`에 누적 기록하고, 기록 이전 과거 구간은 중립(0)으로 채웁니다. 즉 **오늘부터 실제 히스토리가 쌓이기 시작**하는 구조라, 초반에는 이 피처의 영향력이 거의 0입니다(모델 상세의 회귀계수로 확인 가능) — 매일 대시보드를 쓸수록 점점 유의미해집니다.
   - ⚠️ 이 로그 파일은 `data/raw/`에 있어 현재 `.gitignore`(다른 캐시처럼 "재생성 가능"으로 분류)에 걸려 있습니다. 하지만 이건 한 번 지우면 과거로 되돌아가 다시 쌓을 수 없는 유일한 데이터입니다 — 나중에 git을 초기화하게 되면 `data/raw/news_sentiment/`만 예외로 추적할지 고려하세요.
+
+## 모의투자 (페이퍼 트레이딩)
+
+**⚠️ 실제 금전 거래가 아닌 시뮬레이션입니다. 투자 조언이 아닙니다.** 가상 현금 1억원으로 시작해 KOSPI/KOSDAQ 종목을 규칙 기반(결정론적) 엔진이 자동으로 매매합니다. 상세 설계는 [PRD.md](./PRD.md) 참고.
+
+```powershell
+# 기존 app.py는 그대로 두고, 모의투자 화면을 더한 별도 데모 진입점으로 확인
+.venv\Scripts\streamlit.exe run demo_app.py
+
+# 로컬에서 매매 로직만 수동 실행 (원장을 건드리지 않는 dry-run)
+.venv\Scripts\python.exe scripts\run_daily_trading.py --dry-run
+```
+
+- **실행과 조회가 분리되어 있습니다.** 실제 매매는 GitHub Actions(`.github/workflows/daily_trading.yml`)가 매 평일 1회(장 마감 후, 19:30 KST 전후) 자동으로 실행하고 원장(`data/portfolio/`)을 직접 커밋합니다 — Streamlit 앱을 누가 방문하는지와 무관합니다. `demo_app.py`의 "모의투자" 페이지는 그 원장을 **읽기만** 합니다.
+- 매매 판단은 예측 수익률·RSI·뉴스 감성에 임계값을 적용하는 규칙 엔진(`src/trading_agent.py`)이고, 제안된 매매는 별도 리스크 가드레일(종목당 비중·동시보유·하루 거래횟수·현금 한도)이 한 번 더 검증해 위반 시 거부합니다.
+- 워크플로는 처음엔 `workflow_dispatch`(수동 버튼)로만 동작하도록 커밋돼 있습니다 — GitHub 저장소에서 수동 실행으로 커밋·푸시가 정상인지 확인한 뒤 `daily_trading.yml`의 `schedule` 주석을 해제해야 매일 자동으로 돕니다.
+- GitHub Actions는 `requirements.txt` 전체가 아니라 `requirements-trading.txt`(매매 스크립트에 실제로 필요한 패키지만)를 설치합니다.
 
 ## 사용 예
 

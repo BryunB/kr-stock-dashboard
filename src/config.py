@@ -16,8 +16,9 @@ DATA_DIR = BASE_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
 CACHE_DIR = DATA_DIR / "cache"
 OUTPUT_DIR = BASE_DIR / "output"
+PORTFOLIO_DIR = DATA_DIR / "portfolio"  # 모의투자 원장 (git으로 추적 — data/cache·raw와 다름)
 
-for _d in (RAW_DIR, CACHE_DIR, OUTPUT_DIR):
+for _d in (RAW_DIR, CACHE_DIR, OUTPUT_DIR, PORTFOLIO_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # 데이터 조회 기본 시작일 (지정 안 하면 여기서부터)
