@@ -6,7 +6,7 @@
 
 import pandas as pd
 
-from src.trading_agent import TRADING_RULES, TradeAction, apply_risk_guardrail, decide_trades
+from src.trading_agent import TRADING_RULES, TradeAction, apply_risk_guardrail, decide_trades, infer_market
 
 
 def _holdings(rows: list[dict]) -> pd.DataFrame:
@@ -199,6 +199,31 @@ def test_sell_take_profit_triggers():
     assert "익절" in actions[0].reason
 
 
+def test_sell_coin_fractional_holding_stop_loss_preserves_quantity():
+    """회귀 테스트: 매도 수량을 int()로 캐스팅하면 1 미만 소수 코인 보유분(예: 0.5 BTC)이
+    quantity=0으로 잘려서, portfolio.apply_trade()의 "quantity는 양수여야 합니다" 예외로
+    그날 실행 전체가 죽는다. 소수 그대로 나가야 한다."""
+    holdings = _holdings([{"code": "KRW-BTC", "name": "비트코인", "quantity": 0.5, "avg_price": 100_000_000}])
+    price = 100_000_000 * (1 + TRADING_RULES["stop_loss_pct"] - 0.001)
+    actions = decide_trades([], holdings, {"KRW-BTC": price}, cash=0)
+    assert len(actions) == 1
+    assert actions[0].quantity == 0.5
+    assert actions[0].quantity > 0
+
+
+def test_guardrail_approves_coin_fractional_holding_sell():
+    """회귀 테스트: apply_risk_guardrail()이 sim_holdings 초기화 시 보유 수량을 int()로
+    캐스팅하면 소수 코인 보유분이 0으로 보여, 실제로는 다 갖고 있는데도 "보유 수량을
+    초과하는 매도 제안"으로 잘못 거부된다."""
+    holdings = _holdings([{"code": "KRW-BTC", "name": "비트코인", "quantity": 0.5, "avg_price": 100_000_000}])
+    actions = [TradeAction(action="sell", code="KRW-BTC", quantity=0.5, reason="테스트")]
+    approved, rejected = apply_risk_guardrail(
+        actions, holdings, cash=0, current_prices={"KRW-BTC": 100_000_000}
+    )
+    assert approved == actions
+    assert rejected == []
+
+
 def test_sell_negative_signal_triggers():
     holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 10, "avg_price": 100_000}])
     signals = [_signal("005930", predicted_return_5d=-0.01)]
@@ -380,4 +405,79 @@ def test_guardrail_sell_frees_cash_for_subsequent_buy():
         actions, holdings, cash=0, current_prices={"000660": 100_000, "005930": 70_000}, rules=rules
     )
     assert len(approved) == 2
+    assert rejected == []
+
+
+# ==================================================================== infer_market
+
+
+def test_infer_market_kr_six_digit_code():
+    assert infer_market("005930") == "KR"
+    assert infer_market("000660") == "KR"
+
+
+def test_infer_market_coin_krw_prefix():
+    assert infer_market("KRW-BTC") == "COIN"
+    assert infer_market("KRW-ETH") == "COIN"
+
+
+def test_infer_market_us_ticker():
+    assert infer_market("AAPL") == "US"
+    assert infer_market("NVDA") == "US"
+
+
+# ==================================================================== decide_trades — 코인 소수 수량
+
+
+def test_buy_coin_high_price_yields_fractional_quantity():
+    """비트코인처럼 1개 가격이 종목당 최대 비중 예산보다 훨씬 큰 코인 — 정수 수량
+    로직이었다면 quantity=0이 되어 매수가 아예 생기지 않았을 상황에서, 코인은 소수
+    수량으로 실제 매수 액션이 생겨야 한다."""
+    price = 150_000_000  # 1.5억원짜리 코인 (비트코인 가정)
+    cash = 100_000_000  # 예산 1억원 -> max_position_pct 15%면 목표 배분액은 1,500만원
+    signals = [_signal("KRW-BTC", predicted_return_5d=0.10)]
+    actions = decide_trades(signals, EMPTY_HOLDINGS, {"KRW-BTC": price}, cash=cash)
+
+    # 정수 수량이었다면: int(15_000_000 // 150_000_000) == 0 -> 매수 액션 없음
+    assert int(TRADING_RULES["max_position_pct"] * cash // price) == 0
+
+    assert len(actions) == 1
+    a = actions[0]
+    assert a.action == "buy"
+    assert a.code == "KRW-BTC"
+    assert isinstance(a.quantity, float)
+    assert a.quantity > 0
+    # round(15_000_000 / 150_000_000, 8) == 0.1
+    assert a.quantity == round(0.15 * cash / price, 8)
+    amount = a.quantity * price
+    assert amount >= TRADING_RULES["min_trade_amount"]
+
+
+def test_buy_non_coin_still_uses_integer_quantity():
+    """국내(6자리 숫자)·해외(그 외 문자 티커) 종목은 여전히 정수 수량으로 계산된다."""
+    signals = [
+        _signal("005930", predicted_return_5d=0.10),
+        _signal("AAPL", predicted_return_5d=0.09),
+    ]
+    prices = {"005930": 70_000, "AAPL": 199.5}
+    actions = decide_trades(signals, EMPTY_HOLDINGS, prices, cash=100_000_000)
+
+    by_code = {a.code: a for a in actions}
+    assert isinstance(by_code["005930"].quantity, int)
+    assert isinstance(by_code["AAPL"].quantity, int)
+
+
+# ==================================================================== apply_risk_guardrail — 코인 소수 수량
+
+
+def test_guardrail_approves_fractional_coin_buy():
+    """소수 수량 매수 액션도 가드레일이 정상 승인해야 한다 (수량 비교·현금 차감이
+    float에서도 깨지지 않는지 확인)."""
+    price = 150_000_000
+    quantity = round(0.15 * 100_000_000 / price, 8)  # 0.1
+    actions = [TradeAction(action="buy", code="KRW-BTC", quantity=quantity, reason="테스트")]
+    approved, rejected = apply_risk_guardrail(
+        actions, EMPTY_HOLDINGS, cash=100_000_000, current_prices={"KRW-BTC": price}
+    )
+    assert approved == actions
     assert rejected == []

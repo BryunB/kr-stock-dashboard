@@ -20,6 +20,7 @@ __all__ = [
     "get_closes",
     "get_listing",
     "find_symbol",
+    "get_usdkrw_rate",
     "clear_cache",
 ]
 
@@ -84,6 +85,16 @@ def get_listing(market: str = "KRX", use_cache: bool = True) -> pd.DataFrame:
     if not df.empty:
         df.to_parquet(path)
     return df
+
+
+def get_usdkrw_rate(use_cache: bool = True) -> float:
+    """최근 USD/KRW 종가 1개. 해외증시 금액을 원화로 환산할 때 쓴다(모니터링 페이지의
+    통화 토글, 모의투자의 해외증시 매매 체결 등) — 두 곳이 각자 fdr 심볼 문자열을
+    들고 있지 않도록 여기 한 곳에만 둔다. 실패하면(네트워크 등) NaN을 돌려주고,
+    호출부가 그에 맞게 폴백해야 한다(예: 달러 표기 유지, 해외증시 매매 보류)."""
+    start = (pd.Timestamp.today() - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+    df = get_price("USD/KRW", start=start, use_cache=use_cache)
+    return float(df["Close"].iloc[-1]) if not df.empty else float("nan")
 
 
 def find_symbol(keyword: str, market: str = "KRX") -> pd.DataFrame:

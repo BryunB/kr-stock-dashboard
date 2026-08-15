@@ -78,7 +78,7 @@ def apply_trade(
     code: str,
     name: str,
     action: str,
-    quantity: int,
+    quantity: int | float,
     price: float,
     reason: str,
 ) -> tuple[pd.DataFrame, float, dict]:

@@ -68,27 +68,47 @@ _US_DEFAULT = ("AAPL", "Apple Inc")
 _US_BENCHMARKS = ("NASDAQ", "S&P500", "DOW", "NIKKEI225", "VIX")
 
 
-def _change_html(diff: float, pct: float, *, soft: bool = False, unit: str = "원", decimals: int = 0) -> str:
+def _change_html(
+    diff: float,
+    pct: float,
+    *,
+    soft: bool = False,
+    unit: str = "원",
+    decimals: int = 0,
+    usd_rate: float | None = None,
+) -> str:
     up, down, flat = (UP_SOFT, DOWN_SOFT, FLAT_SOFT) if soft else (UP_COLOR, DOWN_COLOR, FLAT_COLOR)
     color = up if diff > 0 else down if diff < 0 else flat
     arrow = "▲" if diff > 0 else "▼" if diff < 0 else "―"
-    diff_str = f"${diff:+,.{decimals}f}" if unit == "$" else f"{diff:+,.{decimals}f}{unit}"
+    if unit == "$":
+        diff_str = f"${diff:+,.{decimals}f}"
+    else:
+        diff_str = f"{diff * usd_rate if usd_rate else diff:+,.{decimals}f}{unit}"
     return (
         f"<span style='color:{color};font-weight:600;font-size:0.95rem'>"
         f"{arrow} {diff_str} ({pct:+.2f}%)</span>"
     )
 
 
-def _money(v: float, *, unit: str = "원") -> str:
-    """가격 한 값을 통화 단위에 맞게 포맷한다. 해외증시는 '$' 접두사 + 소수 2자리(센트 단위),
-    국내/코인은 기존과 동일하게 '원' 접미사 + 정수."""
-    return f"${v:,.2f}" if unit == "$" else f"{v:,.0f}원"
+def _money(v: float, *, unit: str = "원", usd_rate: float | None = None) -> str:
+    """가격 한 값을 통화 단위에 맞게 포맷한다. unit="$"면 소수 2자리 접두사 표기, unit="원"이면
+    정수 접미사 표기 — 이때 usd_rate가 주어지면(해외증시 원화 토글 켜짐) v(달러)를 원화로
+    환산한 뒤 포맷한다. usd_rate가 없으면(국내/코인처럼 원래부터 원화 값) 그대로 포맷."""
+    if unit == "$":
+        return f"${v:,.2f}"
+    if usd_rate:
+        v = v * usd_rate
+    return f"{v:,.0f}원"
 
 
-def _big_money(v: float, *, unit: str = "원") -> str:
-    """시가총액/거래대금처럼 큰 금액을 스케일링해서 포맷한다. 해외증시는 10억달러(B) 단위,
-    국내/코인은 기존과 동일하게 억원 단위."""
-    return f"${v / 1e9:,.2f}B" if unit == "$" else f"{v / 1e8:,.0f}억원"
+def _big_money(v: float, *, unit: str = "원", usd_rate: float | None = None) -> str:
+    """시가총액/거래대금처럼 큰 금액을 스케일링해서 포맷한다. unit="$"면 10억달러(B) 단위,
+    unit="원"이면 억원 단위 — usd_rate가 주어지면 환산 후 억원으로 포맷(위 _money와 동일 원리)."""
+    if unit == "$":
+        return f"${v / 1e9:,.2f}B"
+    if usd_rate:
+        v = v * usd_rate
+    return f"{v / 1e8:,.0f}억원"
 
 
 def _section_title(text: str) -> None:
@@ -122,6 +142,32 @@ def _crypto_screen() -> pd.DataFrame:
 @st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="해외증시 시세 불러오는 중...")
 def _us_screen() -> pd.DataFrame:
     return us_screener.screen()
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner=False)
+def _usdkrw_rate() -> float:
+    """해외증시 원화 환산 토글용 캐시 래퍼. 실제 조회는 data_loader.get_usdkrw_rate()를
+    그대로 쓴다(scripts/run_daily_trading.py의 해외증시 매매 환산도 같은 함수를 쓴다 —
+    fdr 심볼 문자열을 두 곳에 따로 두지 않는다). 실패하면 NaN을 돌려주고,
+    호출부(_us_currency_state)가 이걸 감지해서 원화 표기를 강제로 끄고 달러로 폴백한다."""
+    return dl.get_usdkrw_rate()
+
+
+def _us_currency_state() -> tuple[str, float, int]:
+    """해외증시 상단 '원화(₩)로 표기' 체크박스(session_state 키 "us_show_krw") 상태를 읽어
+    (통화단위, 환율, 소수자리)를 돌려준다. 국내증시/코인은 원래부터 원화 값이라 항상
+    ("원", 1.0(환산 안 함), 0)을 돌려주고(usd_rate=1.0으로 배수 곱해도 그대로라 호출부가
+    is_us 분기를 따로 안 해도 된다), 해외증시는 토글에 따라 ("$", 1.0, 2) 또는
+    ("원", 환율, 0)이 된다."""
+    if not is_us:
+        return "원", 1.0, 0
+    show_krw = st.session_state.get("us_show_krw", False)
+    if not show_krw:
+        return "$", 1.0, 2
+    rate = _usdkrw_rate()
+    if not rate or pd.isna(rate):
+        return "$", 1.0, 2  # 환율 조회 실패 — 원화 강제 해제하고 달러로 폴백
+    return "원", rate, 0
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SEC, show_spinner="가격 데이터 불러오는 중...")
@@ -284,10 +330,24 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
                 )
             )
     elif is_us:
-        top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
-        if st.button("🔄", help="새로고침 (캐시 초기화)"):
-            st.cache_data.clear()
-            st.rerun()
+        us_top1, _us_spacer, us_top2, us_top3 = st.columns([2, 3, 2.4, 0.9])
+        with us_top1:
+            top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
+        with us_top2:
+            st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
+            st.checkbox("원화(₩)로 표기", key="us_show_krw")
+        with us_top3:
+            st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
+            if st.button("🔄", help="새로고침 (캐시 초기화)"):
+                st.cache_data.clear()
+                st.rerun()
+
+        _unit, _usd_rate, _ = _us_currency_state()
+        if st.session_state.get("us_show_krw") and _unit == "$":
+            st.caption("⚠️ 환율 정보를 가져오지 못해 달러로 표시합니다.")
+        _px_fmt = "%,.0f원" if _unit == "원" else "$%,.2f"
+        _big_fmt = "%,.0f억원" if _unit == "원" else "$%,.2fB"
+        _big_scale = 1e8 if _unit == "원" else 1e9
 
         try:
             universe = _us_screen()
@@ -297,12 +357,18 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
 
         market_label = "NASDAQ"
 
-        def _render_table(ranked, key, value_col, value_label, fmt, scale=1.0):
+        def _render_table(ranked, key, value_col, value_label, *, is_pct=False):
             display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
-            display[value_label] = ranked[value_col] / scale
+            display["종가"] = display["종가"] * _usd_rate
+            if is_pct:
+                display[value_label] = ranked[value_col]
+                value_fmt = "%.2f%%"
+            else:
+                display[value_label] = ranked[value_col] * _usd_rate / _big_scale
+                value_fmt = _big_fmt
             col_config = {
-                "종가": st.column_config.NumberColumn(format="$%,.2f"),
-                value_label: st.column_config.NumberColumn(format=fmt),
+                "종가": st.column_config.NumberColumn(format=_px_fmt),
+                value_label: st.column_config.NumberColumn(format=value_fmt),
             }
             return st.dataframe(
                 display[["종목명", "종가", value_label]],
@@ -330,7 +396,7 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
                 (
                     "tbl_rise",
                     ranked_rise,
-                    _render_table(ranked_rise, "tbl_rise", "DailyChangeRatio", "등락%", "%.2f%%"),
+                    _render_table(ranked_rise, "tbl_rise", "DailyChangeRatio", "등락%", is_pct=True),
                 )
             )
 
@@ -341,7 +407,7 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
                 (
                     "tbl_amount",
                     ranked_amount,
-                    _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "$%,.2fB", scale=1e9),
+                    _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금"),
                 )
             )
 
@@ -352,7 +418,7 @@ with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
                 (
                     "tbl_marcap",
                     ranked_marcap,
-                    _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액", "$%,.2fB", scale=1e9),
+                    _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액"),
                 )
             )
     else:
@@ -587,27 +653,34 @@ with right_col:
         _vol_unit = selected_code.replace("KRW-", "") if is_crypto else "주"
         _vol_fmt = f"{float(_last['Volume']):,.4f}" if is_crypto else f"{float(_last['Volume']):,.0f}"
 
-        _unit = "$" if is_us else "원"
+        _unit, _usd_rate, _decimals = _us_currency_state()
 
         _r1 = st.columns(8)
-        _r1[0].metric("현재가", _money(_close, unit=_unit))
+        _r1[0].metric("현재가", _money(_close, unit=_unit, usd_rate=_usd_rate))
         if _prev_close:
             _diff = _close - _prev_close
             _r1[0].markdown(
-                _change_html(_diff, _diff / _prev_close * 100, unit=_unit, decimals=2 if is_us else 0),
+                _change_html(
+                    _diff, _diff / _prev_close * 100, unit=_unit, decimals=_decimals, usd_rate=_usd_rate
+                ),
                 unsafe_allow_html=True,
             )
-        _r1[1].metric("시가", _money(float(_last["Open"]), unit=_unit))
-        _r1[2].metric("고가", _money(float(_last["High"]), unit=_unit))
-        _r1[3].metric("저가", _money(float(_last["Low"]), unit=_unit))
-        _r1[4].metric("전일종가", _money(_prev_close, unit=_unit) if _prev_close else "—")
-        _r1[5].metric("변동폭", _money(float(_last["High"]) - float(_last["Low"]), unit=_unit))
+        _r1[1].metric("시가", _money(float(_last["Open"]), unit=_unit, usd_rate=_usd_rate))
+        _r1[2].metric("고가", _money(float(_last["High"]), unit=_unit, usd_rate=_usd_rate))
+        _r1[3].metric("저가", _money(float(_last["Low"]), unit=_unit, usd_rate=_usd_rate))
+        _r1[4].metric("전일종가", _money(_prev_close, unit=_unit, usd_rate=_usd_rate) if _prev_close else "—")
+        _r1[5].metric(
+            "변동폭", _money(float(_last["High"]) - float(_last["Low"]), unit=_unit, usd_rate=_usd_rate)
+        )
         _r1[6].metric("거래량", f"{_vol_fmt}{_vol_unit}")
-        _r1[7].metric("거래대금" if not is_crypto else "24H 거래대금", _big_money(_amount, unit=_unit))
+        _r1[7].metric(
+            "거래대금" if not is_crypto else "24H 거래대금",
+            _big_money(_amount, unit=_unit, usd_rate=_usd_rate),
+        )
 
         _notes = [f"{_last_date:%Y-%m-%d (%a)} 기준"]
         if _marcap:
-            _notes.append(f"시총 {_big_money(_marcap, unit=_unit)}")
+            _notes.append(f"시총 {_big_money(_marcap, unit=_unit, usd_rate=_usd_rate)}")
         if is_crypto:
             _notes.append("거래대금은 최근 24시간 누적(업비트 기준)")
         elif is_us:
@@ -800,11 +873,12 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
         if "error" in pred:
             st.info(pred["error"])
         else:
+            _pred_unit, _pred_rate, _pred_decimals = _us_currency_state()
             pred_col, info_col = st.columns([1, 1])
             with pred_col:
                 st.metric(
                     pred["target_date"].strftime("%m-%d(%a)"),
-                    _money(pred["predicted_price"], unit="$" if is_us else "원"),
+                    _money(pred["predicted_price"], unit=_pred_unit, usd_rate=_pred_rate),
                 )
             with info_col:
                 st.markdown("<div style='height:0.35em'></div>", unsafe_allow_html=True)
@@ -813,14 +887,15 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
                         pred["predicted_price"] - pred["last_close"],
                         pred["predicted_return"] * 100,
                         soft=True,
-                        unit="$" if is_us else "원",
-                        decimals=2 if is_us else 0,
+                        unit=_pred_unit,
+                        decimals=_pred_decimals,
+                        usd_rate=_pred_rate,
                     ),
                     unsafe_allow_html=True,
                 )
                 st.caption(
                     f"{pred['best_model']} · 검증{pred['n_holdout']}일 · "
-                    f"MAE {_money(pred['mae'], unit='$' if is_us else '원')} · "
+                    f"MAE {_money(pred['mae'], unit=_pred_unit, usd_rate=_pred_rate)} · "
                     f"MAPE {pred['mape'] * 100:.1f}% · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
                 )
 

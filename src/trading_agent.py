@@ -4,6 +4,10 @@ PRD.md 5.2·5.3·6장 참고. LLM을 쓰지 않는다(원안은 PRD 9.1에 보�
 예측 신호(predictor.py 산출물 기반)에 임계값 규칙을 적용해 결정론적으로 매매를 판단한다.
 외부 API 호출이 없으므로 전부 순수 함수이고, 오프라인에서 바로 테스트할 수 있다.
 
+국내(KOSPI/KOSDAQ)·해외증시(나스닥)·코인(업비트) 세 시장을 모두 다룬다. 원장 스키마에
+market 컬럼을 두지 않고, `infer_market()`이 종목코드 문자열의 형식(6자리 숫자/"KRW-"
+접두사/그 외)만으로 시장을 판별한다 — 리스크 규칙(TRADING_RULES)은 세 시장 공통이다.
+
 decide_trades()가 "무엇을 얼마나 살지" 제안하고, apply_risk_guardrail()이 그 제안을
 현금·보유수량·리스크 한도로 다시 검증한다. 5.2가 이미 같은 TRADING_RULES를 참조해
 판단하므로 원칙적으로 위반이 없어야 맞지만, 로직 버그(부호 반전, 여러 매수가 겹쳐
@@ -39,6 +43,18 @@ TRADING_RULES = {
 }
 
 
+def infer_market(code: str) -> str:
+    """종목코드 문자열 패턴만으로 시장을 판별한다 — 원장 스키마에 market 컬럼을 추가하는
+    마이그레이션을 피하려고 코드 자체의 형식적 특징에 의존한다. 국내(KR)는 항상 정확히
+    6자리 숫자, 코인(COIN)은 항상 "KRW-" 접두사, 그 외(미국 티커 등, 숫자로만 이루어지지
+    않는다)는 해외증시(US)로 본다. 세 패턴은 서로 겹치지 않는다."""
+    if code.startswith("KRW-"):
+        return "COIN"
+    if code.isdigit() and len(code) == 6:
+        return "KR"
+    return "US"
+
+
 @dataclass(frozen=True)
 class TradeAction:
     """decide_trades()가 제안하고 apply_risk_guardrail()이 승인/거부하는 매매 액션 1건.
@@ -47,11 +63,13 @@ class TradeAction:
     (PRD 5.3 "체결가 가정") 호출부가 current_prices에서 조회해 쓰고, name도 호출부가
     holdings/candidates에서 이미 갖고 있는 값을 그대로 쓰면 된다. 여기서 복사해 들고
     다니면 두 값이 어긋날 여지만 생긴다.
+
+    quantity는 국내/해외증시는 정수(주 단위)지만, 코인은 소수일 수 있다.
     """
 
     action: str  # "buy" | "sell"
     code: str
-    quantity: int
+    quantity: int | float
     reason: str
 
 
@@ -70,6 +88,9 @@ def decide_trades(
     rules: dict = TRADING_RULES,
 ) -> list[TradeAction]:
     """워치리스트+보유종목 신호와 현재 포지션을 보고 오늘의 매매를 제안한다.
+
+    국내·해외증시·코인 신호가 섞여 들어올 수 있다 — `infer_market(code)`가 코드 패턴으로
+    시장을 판별해, 코인은 매수 수량을 정수 주가 아니라 소수(8자리 반올림)로 계산한다.
 
     signals: [{code, name, predicted_return_5d, rsi14, news_sentiment,
     directional_accuracy}, ...] — predictor.py 산출물 기반. **보유 종목도 반드시
@@ -117,9 +138,10 @@ def decide_trades(
             reason = f"RSI {signal['rsi14']:.0f} — 과매수 구간 진입으로 매도"
 
         if reason is not None:
-            actions.append(
-                TradeAction(action="sell", code=code, quantity=int(row["quantity"]), reason=reason)
-            )
+            # int()로 캐스팅하면 코인처럼 1 미만 소수 수량을 보유 중인 경우 quantity가 0이
+            # 되어, portfolio.apply_trade()의 "quantity는 양수여야 합니다" 예외로 그날 실행
+            # 전체가 죽는다 — 보유 수량을 그대로(코인이면 float) 써서 전량 매도한다.
+            actions.append(TradeAction(action="sell", code=code, quantity=row["quantity"], reason=reason))
 
     # --- 신규 매수: 조건을 모두 만족하는 후보를 예측 5일 수익률 내림차순으로 채택 ---
     held_codes = set(holdings["code"])
@@ -158,7 +180,16 @@ def decide_trades(
         if n_buys >= rules["max_daily_trades"] or n_buys >= room_for_new:
             break
         target_amount = min(total_equity * rules["max_position_pct"], buy_budget)
-        quantity = int(target_amount // price)
+        if infer_market(s["code"]) == "COIN":
+            # 코인은 1주 단위 개념이 없고 고가 코인(비트코인 등)은 정수 단위로는 배분
+            # 예산 안에서 1개도 못 사는 경우가 흔하다 — 소수 단위로 산다. 업비트 자체
+            # 주문 단위 소수점 정밀도까지는 맞추지 않고(거래소마다 다르고 이 프로젝트는
+            # 시뮬레이션이라 체결 규칙을 그대로 흉내낼 필요는 없다), 부동소수점 표현
+            # 오차가 누적되지 않도록 소수 8자리로 반올림한다(업비트 실제 주문 정밀도와
+            # 비슷한 수준).
+            quantity = round(target_amount / price, 8)
+        else:
+            quantity = int(target_amount // price)
         amount = quantity * price
         if quantity <= 0 or amount < rules["min_trade_amount"]:
             continue  # 예산이 부족한 후보만 건너뛰고, 더 저렴한 다음 후보는 계속 시도한다
@@ -199,8 +230,10 @@ def apply_risk_guardrail(
     {"action", "code", "quantity", "reason", "reason_rejected"} 딕셔너리 리스트 — UI에서
     "오늘 거부된 제안"으로 보여줄 수 있게 원래 reason도 그대로 남긴다.
     """
-    sim_holdings: dict[str, tuple[int, float]] = {
-        row["code"]: (int(row["quantity"]), float(row["avg_price"])) for _, row in holdings.iterrows()
+    # int()로 캐스팅하면 코인처럼 소수 수량인 보유분이 0으로 잘려서(예: 0.5 BTC → 0),
+    # 실제로 보유 중인데도 "보유 수량 초과" 매도 거부가 나는 버그가 된다 — 그대로 둔다.
+    sim_holdings: dict[str, tuple[int | float, float]] = {
+        row["code"]: (row["quantity"], float(row["avg_price"])) for _, row in holdings.iterrows()
     }
     sim_cash = cash
     approved: list[TradeAction] = []
